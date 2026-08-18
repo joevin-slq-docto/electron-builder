@@ -6,6 +6,20 @@ import { BaseUpdater } from "./BaseUpdater.js"
 // Rejects names with shell metacharacters that could cause command injection.
 const SAFE_PM_REGEX = /^[a-zA-Z0-9_-]+$/
 
+/**
+ * Composes `command` with a `fallback` that runs only if `command` failed, as one privileged invocation.
+ *
+ * Running the fallback as a second privileged call asks the user to authenticate a second time, and when the
+ * first failure was the user dismissing the prompt, that second dialog is for a command they never asked for.
+ * The caller cannot tell the two cases apart either: of the helpers `determineSudoCommand` picks from, only
+ * pkexec documents a distinct exit code for a dismissed dialog (126, see pkexec(1)); gksudo, kdesudo, beesu
+ * and sudo exit with 1 both when the user cancels and when the command itself fails. Sequencing inside the
+ * privileged shell settles it — a dismissed prompt runs neither command.
+ */
+export function withFallback(command: string[], fallback: string[]): string[] {
+  return [...command, "||", ...fallback]
+}
+
 export abstract class LinuxUpdater extends BaseUpdater {
   constructor(options?: AllPublishOptions | null, app?: AppAdapter) {
     super(options, app)

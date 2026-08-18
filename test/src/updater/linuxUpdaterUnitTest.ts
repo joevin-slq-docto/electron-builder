@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { DebUpdater, NoOpLogger, RpmUpdater } from "electron-updater"
+import { DebUpdater, NoOpLogger, PacmanUpdater, RpmUpdater } from "electron-updater"
 import type { AppAdapter } from "electron-updater/src/AppAdapter"
 
 const stubApp: AppAdapter = {
@@ -237,17 +237,24 @@ describe("Linux package signature-verification gating", () => {
   })
 
   describe("DebUpdater dpkg branch", () => {
-    it.each([true, false])("installs with dpkg -i and falls back to apt-get -f on failure (allowUnverified=%s)", allow => {
+    it.each([true, false])("chains the apt-get -f repair after dpkg -i in one invocation (allowUnverified=%s)", allow => {
+      const { runner, calls } = capture()
+      DebUpdater.installWithCommandRunner("dpkg", "/tmp/u.deb", runner, noopLogger, allow)
+      // one privileged invocation: two would ask the user to authenticate twice, and a dismissed prompt
+      // would raise the second dialog for a command they never asked for
+      expect(calls).toEqual([["dpkg", "-i", "/tmp/u.deb", "||", "apt-get", "install", "-f", "-y"]])
+    })
+
+    it("does not issue a second command when the install fails", () => {
       const calls: string[][] = []
       const runner = (args: string[]) => {
         calls.push(args)
-        if (calls.length === 1) {
-          throw new Error("simulated dpkg failure")
-        }
+        // any helper reports a dismissed prompt this way; pkexec uses 126, the others exit with 1
+        throw new Error("Command pkexec exited with code 126")
       }
-      DebUpdater.installWithCommandRunner("dpkg", "/tmp/u.deb", runner, noopLogger, allow)
-      expect(calls[0]).toEqual(["dpkg", "-i", "/tmp/u.deb"])
-      expect(calls[1]).toEqual(["apt-get", "install", "-f", "-y"])
+
+      expect(() => DebUpdater.installWithCommandRunner("dpkg", "/tmp/u.deb", runner, noopLogger, true)).toThrow("code 126")
+      expect(calls).toHaveLength(1)
     })
 
     it("warns that enforcement has no effect for dpkg when allowUnverified=false", () => {
@@ -255,6 +262,28 @@ describe("Linux package signature-verification gating", () => {
       const { runner } = capture()
       DebUpdater.installWithCommandRunner("dpkg", "/tmp/u.deb", runner, logger, false)
       expect(warnings.some(m => m.includes("has no effect"))).toBe(true)
+    })
+  })
+
+  describe("PacmanUpdater", () => {
+    it("chains the database refresh and the retry after the install in one invocation", () => {
+      const { runner, calls } = capture()
+      PacmanUpdater.installWithCommandRunner("/tmp/u.pkg.tar.zst", runner, noopLogger)
+      expect(calls).toEqual([
+        // prettier-ignore
+        ["pacman", "-U", "--noconfirm", "/tmp/u.pkg.tar.zst", "||", "(", "pacman", "-Sy", "--noconfirm", "&&", "pacman", "-U", "--noconfirm", "/tmp/u.pkg.tar.zst", ")"],
+      ])
+    })
+
+    it("does not issue a second command when the install fails", () => {
+      const calls: string[][] = []
+      const runner = (args: string[]) => {
+        calls.push(args)
+        throw new Error("Command pkexec exited with code 126")
+      }
+
+      expect(() => PacmanUpdater.installWithCommandRunner("/tmp/u.pkg.tar.zst", runner, noopLogger)).toThrow("code 126")
+      expect(calls).toHaveLength(1)
     })
   })
 

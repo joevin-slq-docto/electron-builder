@@ -4,7 +4,7 @@ import { DownloadUpdateOptions } from "./AppUpdater.js"
 import { InstallOptions } from "./BaseUpdater.js"
 import { DOWNLOAD_PROGRESS, Logger } from "./types.js"
 import { findFile } from "./providers/Provider.js"
-import { LinuxUpdater } from "./LinuxUpdater.js"
+import { LinuxUpdater, withFallback } from "./LinuxUpdater.js"
 
 export class PacmanUpdater extends LinuxUpdater {
   constructor(options?: AllPublishOptions | null, app?: AppAdapter) {
@@ -47,21 +47,10 @@ export class PacmanUpdater extends LinuxUpdater {
   }
 
   static installWithCommandRunner(installerPath: string, commandRunner: (commandWithArgs: string[]) => void, logger: Logger) {
-    try {
-      commandRunner(["pacman", "-U", "--noconfirm", installerPath])
-    } catch (error: any) {
-      logger.warn(error.message ?? error)
-      logger.warn("pacman installation failed, attempting to update package database and retry")
-
-      try {
-        // Update package database (not a full upgrade, just sync)
-        commandRunner(["pacman", "-Sy", "--noconfirm"])
-        // Retry installation
-        commandRunner(["pacman", "-U", "--noconfirm", installerPath])
-      } catch (retryError: any) {
-        logger.error("Retry after pacman -Sy failed")
-        throw retryError
-      }
-    }
+    logger.info("Installing with pacman, refreshing the package database and retrying once if it fails")
+    const install = ["pacman", "-U", "--noconfirm", installerPath]
+    // If the install fails, refresh the package database (not a full upgrade, just sync) and retry — as one
+    // invocation, so the whole install needs a single authentication
+    commandRunner(withFallback(install, ["(", "pacman", "-Sy", "--noconfirm", "&&", ...install, ")"]))
   }
 }

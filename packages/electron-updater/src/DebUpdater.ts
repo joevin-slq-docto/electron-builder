@@ -4,7 +4,7 @@ import { DownloadUpdateOptions } from "./AppUpdater.js"
 import { InstallOptions } from "./BaseUpdater.js"
 import { findFile } from "./providers/Provider.js"
 import { DOWNLOAD_PROGRESS, Logger } from "./types.js"
-import { LinuxUpdater } from "./LinuxUpdater.js"
+import { LinuxUpdater, withFallback } from "./LinuxUpdater.js"
 
 export class DebUpdater extends LinuxUpdater {
   constructor(options?: AllPublishOptions | null, app?: AppAdapter) {
@@ -65,15 +65,10 @@ export class DebUpdater extends LinuxUpdater {
           "allowUnverifiedLinuxPackages=false has no effect when installing with dpkg: dpkg performs no signature verification. Enforcing .deb signature verification requires a debsig-verify/debsigs policy on the target system."
         )
       }
-      try {
-        // Primary: Install .deb directly with dpkg (dpkg performs no signature verification regardless of allowUnverified)
-        commandRunner(["dpkg", "-i", installerPath])
-      } catch (error: any) {
-        // Handle missing dependencies via apt-get
-        logger.warn(error.message ?? error)
-        logger.warn("dpkg installation failed, trying to fix broken dependencies with apt-get")
-        commandRunner(["apt-get", "install", "-f", "-y"])
-      }
+      // Install .deb directly with dpkg (dpkg performs no signature verification regardless of allowUnverified),
+      // and repair missing dependencies with apt-get if it fails — as one invocation, so the whole install
+      // needs a single authentication
+      commandRunner(withFallback(["dpkg", "-i", installerPath], ["apt-get", "install", "-f", "-y"]))
     } else if (packageManager === "apt") {
       if (allowUnverified) {
         logger.info(
