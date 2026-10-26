@@ -10,17 +10,31 @@
  *
  * After fetching, run:
  *   pnpm ci:test:count
+ *
+ * CI usage:
+ *   - VITEST_CACHE_REF (set by the pretest action) selects the ref, e.g. "PR-123" or "release-v26".
+ *   - The shard planner (validate-and-shard) writes the exact source it restored to $GITHUB_OUTPUT as
+ *     `source=<artifact-name>@<run-id>` (or `source=none`).
+ *   - Shard jobs receive that value as VITEST_SMART_CACHE_SOURCE and restore exactly the same snapshot,
+ *     so their in-job shard plan is identical to the matrix the planner produced. Resolving "the latest
+ *     artifact" independently in every job is not deterministic: the artifact can be replaced mid-run.
  */
 
-import { execSync, spawnSync } from "child_process"
+import { spawnSync } from "child_process"
 import * as fs from "fs"
 import * as path from "path"
-import { CACHE_FILE } from "./vitest-config/smart-config.js"
+import { CACHE_FILE, parseSmartCacheSource } from "./vitest-config/smart-config.js"
 
 const REPO = "electron-userland/electron-builder"
 
-function run(cmd: string): string {
-  return execSync(cmd, { encoding: "utf8" }).trim()
+// Runs a command without a shell so behavior is identical on Windows (cmd.exe has no /dev/null and
+// `echo ""` prints the quotes literally, which previously produced the bogus ref `PR-""`).
+function run(cmd: string, args: string[]): string | null {
+  const result = spawnSync(cmd, args, { encoding: "utf8" })
+  if (result.status !== 0) {
+    return null
+  }
+  return result.stdout.trim()
 }
 
 function ghJson(endpoint: string): any {
@@ -43,26 +57,50 @@ function sanitizeRef(ref: string): string {
 }
 
 function detectRef(): string {
-  // Check for open PR for the current branch
-  try {
-    const branch = run("git rev-parse --abbrev-ref HEAD")
-    const pr = run(`gh pr view --json number -q .number 2>/dev/null || echo ""`)
-    if (pr) {
-      return `PR-${pr}`
-    }
-    return branch
-  } catch {
-    return "master"
+  // CI computes the ref once (PR number or sanitized branch name) and passes it in. Prefer it so every
+  // job on every OS looks up the same artifact.
+  const envRef = process.env.VITEST_CACHE_REF?.trim()
+  if (envRef) {
+    return envRef
+  }
+
+  // Local usage: check for an open PR for the current branch
+  const pr = run("gh", ["pr", "view", "--json", "number", "-q", ".number"])
+  if (pr && /^\d+$/.test(pr)) {
+    return `PR-${pr}`
+  }
+  const branch = run("git", ["rev-parse", "--abbrev-ref", "HEAD"])
+  return branch && branch !== "HEAD" ? branch : "master"
+}
+
+function setGithubOutput(key: string, value: string) {
+  const outputFile = process.env.GITHUB_OUTPUT
+  if (outputFile) {
+    fs.appendFileSync(outputFile, `${key}=${value}\n`)
   }
 }
 
+const DOWNLOAD_ATTEMPTS = 3
+const DOWNLOAD_RETRY_DELAY_MS = 5000
+
+// `gh run download` fails now and then on a transient GitHub API or blob storage error, so it is tried a few times, and
+// what gh reports is printed: without it, the failure of a pinned restore says nothing about its cause.
 function downloadArtifact(runId: number, artifactName: string, dest: string): boolean {
   const tmpDir = path.join(path.dirname(dest), ".cache-download-tmp")
-  fs.mkdirSync(tmpDir, { recursive: true })
   try {
-    const result = spawnSync("gh", ["run", "download", String(runId), "--repo", REPO, "--name", artifactName, "--dir", tmpDir], { encoding: "utf8" })
-    if (result.status !== 0) {
-      return false
+    for (let attempt = 1; ; attempt++) {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+      fs.mkdirSync(tmpDir, { recursive: true })
+      const result = spawnSync("gh", ["run", "download", String(runId), "--repo", REPO, "--name", artifactName, "--dir", tmpDir], { encoding: "utf8" })
+      if (result.status === 0) {
+        break
+      }
+      const reason = (result.stderr || result.error?.message || `exit code ${result.status}`).trim()
+      console.log(`  gh run download failed (attempt ${attempt}/${DOWNLOAD_ATTEMPTS}): ${reason}`)
+      if (attempt === DOWNLOAD_ATTEMPTS) {
+        return false
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, DOWNLOAD_RETRY_DELAY_MS)
     }
     const downloaded = fs.readdirSync(tmpDir).find(f => f === "_vitest-smart-cache.json")
     if (!downloaded) {
@@ -100,7 +138,31 @@ function summarize(dest: string) {
   console.log()
 }
 
+// Restores exactly the snapshot the shard planner used. Fails hard instead of falling back: a different
+// cache yields a different shard plan, which either errors with "Shard index N is out of range" or
+// silently skips/duplicates test files.
+function restorePinnedSource(source: string, dest: string) {
+  const parsed = parseSmartCacheSource(source)
+  if (parsed.kind === "none") {
+    console.log("Shard planner used no smart cache; not restoring one so the shard plan matches.")
+    fs.rmSync(dest, { force: true })
+    return
+  }
+  console.log(`Restoring smart cache pinned by the shard planner: ${parsed.name} from run ${parsed.runId}`)
+  if (!downloadArtifact(parsed.runId, parsed.name, dest)) {
+    throw new Error(`Failed to download pinned smart cache ${parsed.name} from run ${parsed.runId}`)
+  }
+  console.log(`✓ Restored ${parsed.name} → ${dest}`)
+  summarize(dest)
+}
+
 function main() {
+  const pinned = process.env.VITEST_SMART_CACHE_SOURCE?.trim()
+  if (pinned) {
+    restorePinnedSource(pinned, CACHE_FILE)
+    return
+  }
+
   const args = process.argv.slice(2)
   let ref: string | null = null
   for (let i = 0; i < args.length; i++) {
@@ -129,12 +191,14 @@ function main() {
     if (downloadArtifact(runId, name, dest)) {
       console.log(`✓ Restored ${name} → ${dest}`)
       summarize(dest)
+      setGithubOutput("source", `${name}@${runId}`)
       console.log(`Run 'pnpm ci:test:count' to preview the shard plan with timing data.`)
       return
     }
     console.log(`  Download failed.`)
   }
 
+  setGithubOutput("source", "none")
   console.log("No smart cache artifact found. Run 'pnpm ci:test:count' to see the default plan.")
 }
 

@@ -1,12 +1,28 @@
-import { parseValidEnvVarUrl } from "builder-util/internal"
+import { expandDefaultKeyword, parseValidEnvVarUrl, resolveDefaultKeywordList } from "builder-util/internal"
 import { resolveEnvShellValue, validateShellEmbeddable } from "builder-util/src/envUtil"
-import { removePassword, removePasswordFromArgs, filterSensitiveEnv, spawnAndWriteWithOutput, ExecError } from "builder-util"
+import { removePassword, removePasswordFromArgs, filterSensitiveEnv, spawnAndWrite, spawnAndWriteWithOutput, ExecError, getPlatformIconFileName } from "builder-util"
 import { afterEach, expect, vi } from "vitest"
 
 const testValue = "secretValue"
 const testQuoted = "secret with spaces"
 
+// Fingerprints are keyed per process, so snapshots show where one stands, not its value
+const FINGERPRINT_PATTERN = /[a-f0-9]{32} \(redacted fingerprint\)/g
+const withoutFingerprints = (text: string) => text.replace(FINGERPRINT_PATTERN, "<fingerprint>")
+
 const keys = ["--accessKey", "--secretKey", "-p", "-pass", "-String", "/p", "pass:"]
+
+describe("getPlatformIconFileName", () => {
+  test.each([
+    ["icon", true, "icon.icns"],
+    ["icon.ico", true, "icon.icns"],
+    ["icon.ICO", true, "icon.icns"],
+    ["icon.icns", false, "icon.ico"],
+    ["assets/.ico-cache/icon.png", true, "assets/.ico-cache/icon.png"],
+  ])("maps %s for isMac=%s", (value, isMac, expected) => {
+    expect(getPlatformIconFileName(value, isMac)).toBe(expected)
+  })
+})
 
 keys.forEach(key => {
   describe(`removePassword: ${key}`, () => {
@@ -14,21 +30,21 @@ keys.forEach(key => {
       const input = `${key} ${testValue}`
       const output = removePassword(input)
 
-      expect(output).toMatchSnapshot()
+      expect(withoutFingerprints(output)).toMatchSnapshot()
     })
 
     test("handles double-quoted value (snapshot)", ({ expect }) => {
       const input = `${key} "${testQuoted}"`
       const output = removePassword(input)
 
-      expect(output).toMatchSnapshot()
+      expect(withoutFingerprints(output)).toMatchSnapshot()
     })
 
     test("handles single-quoted value (snapshot)", ({ expect }) => {
       const input = `${key} '${testQuoted}'`
       const output = removePassword(input)
 
-      expect(output).toMatchSnapshot()
+      expect(withoutFingerprints(output)).toMatchSnapshot()
     })
 
     if (key === "/p") {
@@ -37,7 +53,7 @@ keys.forEach(key => {
         const input = `${key} ${macPath}`
         const output = removePassword(input)
 
-        expect(output).toMatchSnapshot()
+        expect(withoutFingerprints(output)).toMatchSnapshot()
       })
     }
   })
@@ -49,7 +65,7 @@ describe("removePassword: /b … /c block", () => {
     const input = `/b ${secret} /c`
     const output = removePassword(input)
 
-    expect(output).toMatchSnapshot()
+    expect(withoutFingerprints(output)).toMatchSnapshot()
   })
 })
 
@@ -174,43 +190,43 @@ describe("removePassword: pass: colon-separator style", () => {
     const output = removePassword("enc pass:topsecret --other")
     expect(output).not.toContain("topsecret")
     expect(output).toContain("pass:")
-    expect(output).toContain("(sha256 hash)")
+    expect(output).toContain("(redacted fingerprint)")
   })
 
   test("redacts pass: value with space", ({ expect }) => {
     const output = removePassword("pass: spaced")
     expect(output).not.toContain("spaced")
-    expect(output).toContain("(sha256 hash)")
+    expect(output).toContain("(redacted fingerprint)")
   })
 })
 
-const SHA256_HASH_RE = /^[a-f0-9]{64} \(sha256 hash\)$/
+const FINGERPRINT_RE = /^[a-f0-9]{32} \(redacted fingerprint\)$/
 
 describe("filterSensitiveEnv", () => {
   test("redacts values for keys containing KEY", ({ expect }) => {
     const result = filterSensitiveEnv({ MY_API_KEY: "abc123" })
-    expect(result.MY_API_KEY).toMatch(SHA256_HASH_RE)
+    expect(result.MY_API_KEY).toMatch(FINGERPRINT_RE)
   })
 
   test("redacts values for keys containing TOKEN", ({ expect }) => {
     const result = filterSensitiveEnv({ GITHUB_TOKEN: "ghp_secret" })
-    expect(result.GITHUB_TOKEN).toMatch(SHA256_HASH_RE)
+    expect(result.GITHUB_TOKEN).toMatch(FINGERPRINT_RE)
   })
 
   test("redacts values for keys containing SECRET", ({ expect }) => {
     const result = filterSensitiveEnv({ AWS_SECRET_ACCESS_KEY: "secret" })
-    expect(result.AWS_SECRET_ACCESS_KEY).toMatch(SHA256_HASH_RE)
+    expect(result.AWS_SECRET_ACCESS_KEY).toMatch(FINGERPRINT_RE)
   })
 
   test("redacts values for keys containing PASSWORD", ({ expect }) => {
     const result = filterSensitiveEnv({ DB_PASSWORD: "hunter2" })
-    expect(result.DB_PASSWORD).toMatch(SHA256_HASH_RE)
+    expect(result.DB_PASSWORD).toMatch(FINGERPRINT_RE)
   })
 
   test("is case-insensitive on the key name", ({ expect }) => {
     const result = filterSensitiveEnv({ api_key: "secret", Auth_Token: "tok" })
-    expect(result.api_key).toMatch(SHA256_HASH_RE)
-    expect(result.Auth_Token).toMatch(SHA256_HASH_RE)
+    expect(result.api_key).toMatch(FINGERPRINT_RE)
+    expect(result.Auth_Token).toMatch(FINGERPRINT_RE)
   })
 
   test("does not redact values for non-sensitive keys", ({ expect }) => {
@@ -221,9 +237,9 @@ describe("filterSensitiveEnv", () => {
 
   test("replaces the entire value, not just the sensitive substring within it", ({ expect }) => {
     // The value itself contains 'password' — only the key triggers redaction.
-    // The entire value must be replaced with a sha256 hash, not "thisismy<hash>".
+    // The entire value must be replaced with a fingerprint, not "thisismy<hash>".
     const result = filterSensitiveEnv({ DB_PASSWORD: "thisismypassword" })
-    expect(result.DB_PASSWORD).toMatch(SHA256_HASH_RE)
+    expect(result.DB_PASSWORD).toMatch(FINGERPRINT_RE)
   })
 
   test("handles a mixed env object, redacting only sensitive keys", ({ expect }) => {
@@ -235,23 +251,23 @@ describe("filterSensitiveEnv", () => {
     })
     expect(result.HOME).toBe("/home/user")
     expect(result.NODE_ENV).toBe("test")
-    expect(result.GITHUB_TOKEN).toMatch(SHA256_HASH_RE)
-    expect(result.MY_API_KEY).toMatch(SHA256_HASH_RE)
+    expect(result.GITHUB_TOKEN).toMatch(FINGERPRINT_RE)
+    expect(result.MY_API_KEY).toMatch(FINGERPRINT_RE)
   })
 
   test("redacts values for keys containing CSC (code-signing certificate vars)", ({ expect }) => {
     const result = filterSensitiveEnv({ CSC_LINK: "https://example.com/cert.p12" })
-    expect(result.CSC_LINK).toMatch(SHA256_HASH_RE)
+    expect(result.CSC_LINK).toMatch(FINGERPRINT_RE)
   })
 
   test("redacts values for WIN_CSC_LINK", ({ expect }) => {
     const result = filterSensitiveEnv({ WIN_CSC_LINK: "/path/to/cert.pfx" })
-    expect(result.WIN_CSC_LINK).toMatch(SHA256_HASH_RE)
+    expect(result.WIN_CSC_LINK).toMatch(FINGERPRINT_RE)
   })
 
   test("redacts values for keys containing CREDENTIAL", ({ expect }) => {
     const result = filterSensitiveEnv({ DB_CREDENTIAL: "s3cr3t" })
-    expect(result.DB_CREDENTIAL).toMatch(SHA256_HASH_RE)
+    expect(result.DB_CREDENTIAL).toMatch(FINGERPRINT_RE)
   })
 
   test("does not redact unrelated LINK or CSC-free vars", ({ expect }) => {
@@ -266,21 +282,21 @@ describe("removePassword: multiple keys in one string", () => {
     const input = `--accessKey key1 --secretKey key2`
     const output = removePassword(input)
 
-    expect(output).toMatchSnapshot()
+    expect(withoutFingerprints(output)).toMatchSnapshot()
   })
 
   test("handles mixed quoted and unquoted keys (snapshot)", ({ expect }) => {
     const input = `-p 'quoted secret' -pass unquoted`
     const output = removePassword(input)
 
-    expect(output).toMatchSnapshot()
+    expect(withoutFingerprints(output)).toMatchSnapshot()
   })
 
   test("handles several keys and /b … /c block (snapshot)", ({ expect }) => {
     const input = `pass: val1 --accessKey "val two" /b blockpass /c`
     const output = removePassword(input)
 
-    expect(output).toMatchSnapshot()
+    expect(withoutFingerprints(output)).toMatchSnapshot()
   })
 })
 
@@ -373,7 +389,7 @@ describe("resolveEnvShellValue", () => {
     expect(resolveEnvShellValue(VAR)).toBe("/some/path")
   })
 
-  const UNSAFE_CHARS = [";", "&", "|", "`", "$", "<", ">", '"', "'"]
+  const UNSAFE_CHARS = [";", "&", "|", "`", "$", "<", ">", '"', "'", "\n", "\r"]
   for (const ch of UNSAFE_CHARS) {
     test(`throws on shell-unsafe character: ${ch}`, ({ expect }) => {
       vi.stubEnv(VAR, `/some/path${ch}foo`)
@@ -392,6 +408,10 @@ describe("resolveEnvShellValue", () => {
   })
 })
 // ─── spawnAndWriteWithOutput ────────────────────────────────────────────────
+
+// the child exits without reading stdin, so writing a large payload reliably fails with EPIPE;
+// the exit code (not the stdin write error) must decide the outcome, with no unhandled 'error' event
+const largePayload = "x".repeat(16 * 1024 * 1024)
 
 describe("spawnAndWriteWithOutput", () => {
   afterEach(() => {
@@ -448,12 +468,34 @@ describe("spawnAndWriteWithOutput", () => {
     expect(stdout).toBe("HELLO WORLD")
   })
 
+  test("resolves when process exits 0 before stdin is fully written (EPIPE)", async ({ expect }) => {
+    const { stdout, stderr } = await spawnAndWriteWithOutput(process.execPath, ["-e", "process.exit(0)"], largePayload)
+    expect(stdout).toBe("")
+    expect(stderr).toBe("")
+  })
+
+  test("rejects with ExecError when process exits non-zero before stdin is fully written (EPIPE)", async ({ expect }) => {
+    const promise = spawnAndWriteWithOutput(process.execPath, ["-e", "process.exit(3)"], largePayload)
+    await expect(promise).rejects.toBeInstanceOf(ExecError)
+    await expect(promise).rejects.toMatchObject({ exitCode: 3 })
+  })
+
   test("rejects with a timeout error when process does not finish within 4 minutes", async ({ expect }) => {
     vi.useFakeTimers()
     const script = `setInterval(() => {}, 999999)`
     const promise = spawnAndWriteWithOutput(process.execPath, ["-e", script], "")
     vi.advanceTimersByTime(4 * 60 * 1000 + 100)
     await expect(promise).rejects.toThrow(/timed out/i)
+  })
+})
+
+describe("spawnAndWrite", () => {
+  test("resolves when process exits 0 before stdin is fully written (EPIPE)", async ({ expect }) => {
+    await expect(spawnAndWrite(process.execPath, ["-e", "process.exit(0)"], largePayload)).resolves.toBeUndefined()
+  })
+
+  test("rejects when process exits non-zero before stdin is fully written (EPIPE)", async ({ expect }) => {
+    await expect(spawnAndWrite(process.execPath, ["-e", "process.exit(3)"], largePayload)).rejects.toBeInstanceOf(ExecError)
   })
 })
 
@@ -478,10 +520,77 @@ describe("validateShellEmbeddable", () => {
       ['index.js"evil"', "double-quote"],
       ["index.js\\evil", "backslash"],
       ["index.js\nevil", "newline"],
+      ["index.js\revil", "carriage return"],
       ["$(rm -rf /)", "command substitution"],
       ["`id`", "backtick substitution"],
     ])("rejects %j (contains %s)", value => {
       expect(() => validateShellEmbeddable(value, "test field")).toThrow()
     })
+  })
+})
+
+describe("expandDefaultKeyword", () => {
+  const defaults = ["a", "b"]
+
+  test('expands every "default" entry at its position, into a new array', ({ expect }) => {
+    const list = ["x", "default", "y", "default"]
+    const result = expandDefaultKeyword(list, defaults)
+    expect(result).toEqual(["x", "a", "b", "y", "a", "b"])
+    expect(result).not.toBe(list)
+    expect(expandDefaultKeyword(["default"], defaults)).not.toBe(defaults)
+    expect(list).toEqual(["x", "default", "y", "default"])
+  })
+
+  test('does not deduplicate, and keeps a list without "default" as it is', ({ expect }) => {
+    expect(expandDefaultKeyword(["a", "default"], defaults)).toEqual(["a", "a", "b"])
+    expect(expandDefaultKeyword(["x"], defaults)).toEqual(["x"])
+    expect(expandDefaultKeyword([], defaults)).toEqual([])
+  })
+
+  test("matches the keyword exactly", ({ expect }) => {
+    expect(expandDefaultKeyword(["Default", " default", "!default"], defaults)).toEqual(["Default", " default", "!default"])
+  })
+
+  test("keeps descriptor objects by reference", ({ expect }) => {
+    const descriptor = { default: null }
+    const result = expandDefaultKeyword<string | object>([descriptor, "default"], ["a"])
+    expect(result).toEqual([descriptor, "a"])
+    expect(result[0]).toBe(descriptor)
+  })
+})
+
+describe("resolveDefaultKeywordList", () => {
+  const defaults = ["a", "b", "c"]
+
+  test('"default" expands to the defaults, deduplicated, the first occurrence keeping its position', ({ expect }) => {
+    expect(resolveDefaultKeywordList(["default"], defaults).result).toEqual(["a", "b", "c"])
+    expect(resolveDefaultKeywordList(["b", "default", "b", "default"], defaults).result).toEqual(["b", "a", "c"])
+  })
+
+  test('a list without "default" replaces the defaults', ({ expect }) => {
+    expect(resolveDefaultKeywordList(["x"], defaults).result).toEqual(["x"])
+    expect(resolveDefaultKeywordList([], defaults).result).toEqual([])
+  })
+
+  test('"!x" removes x wherever it is listed', ({ expect }) => {
+    expect(resolveDefaultKeywordList(["default", "!b"], defaults).result).toEqual(["a", "c"])
+    expect(resolveDefaultKeywordList(["!b", "default", "x"], defaults).result).toEqual(["a", "c", "x"])
+    expect(resolveDefaultKeywordList(["x", "!x"], defaults).result).toEqual([])
+  })
+
+  test("reports the removals that removed nothing, once each", ({ expect }) => {
+    expect(resolveDefaultKeywordList(["default", "!b", "!z", "!z"], defaults).unusedRemovals).toEqual(["z"])
+    expect(resolveDefaultKeywordList(["!b"], defaults)).toEqual({ result: [], unusedRemovals: ["b"] })
+  })
+
+  test('does not validate: "!default" removes a literal "default" value, for the caller to reject', ({ expect }) => {
+    expect(resolveDefaultKeywordList(["default", "!default"], defaults)).toEqual({ result: ["a", "b", "c"], unusedRemovals: ["default"] })
+  })
+
+  test("does not change its inputs", ({ expect }) => {
+    const list = ["default", "!a"]
+    resolveDefaultKeywordList(list, defaults)
+    expect(list).toEqual(["default", "!a"])
+    expect(defaults).toEqual(["a", "b", "c"])
   })
 })

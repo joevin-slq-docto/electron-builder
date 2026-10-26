@@ -1,3 +1,13 @@
+export {
+  isValidPublisherNameDn,
+  matchPublisherName,
+  parseAuthenticodeSignatureOutput,
+  POWERSHELL_ASCII_ESCAPE_FUNCTION,
+  prepareAuthenticodeSignatureExec,
+  preparePowerShellExec,
+  windowsPowerShellPath,
+} from "./authenticodeSignature.js"
+export type { AuthenticodeSignerCertificateData } from "./authenticodeSignature.js"
 export { BlockMap } from "./blockMapApi.js"
 export { CancellationError, CancellationToken } from "./CancellationToken.js"
 export { newError } from "./error.js"
@@ -18,6 +28,7 @@ export {
   safeGetHeader,
   safeStringifyJson,
 } from "./httpExecutor.js"
+export type { LimitedLogger, LoggerLike, LogLevel, LogLimitOptions } from "./logLimiter.js"
 export { MemoLazy } from "./MemoLazy.js"
 export { ProgressCallbackTransform, ProgressInfo } from "./ProgressCallbackTransform.js"
 export {
@@ -35,6 +46,8 @@ export {
   KeygenOptions,
   PublishConfiguration,
   PublishProvider,
+  S3AwsCredentialsEnvNames,
+  S3AwsCredentialsOptions,
   S3Options,
   SnapStoreOptions,
   R2Options,
@@ -44,7 +57,20 @@ export {
 } from "./publishOptions.js"
 export { retry, sleep } from "./retry.js"
 export { parseDn } from "./rfc2253Parser.js"
-export { BlockMapDataHolder, PackageFileInfo, ReleaseNoteInfo, UpdateFileInfo, UpdateInfo, WindowsUpdateInfo } from "./updateInfo.js"
+export { BlockMapDataHolder, PackageFileInfo, ReleaseNoteInfo, UpdateFileInfo, UpdateInfo, UpdateManifestSignature, WindowsUpdateInfo } from "./updateInfo.js"
+export {
+  canonicalizeForSigning,
+  collectManifestSignatures,
+  computeUpdateManifestKeyId,
+  createManifestSignatureEntry,
+  normalizePublicKeyList,
+  parsePublicKey,
+  splitPemBlocks,
+  validateSignedManifestShape,
+  verifyManifestSignature,
+  verifyManifestSignatures,
+  UPDATE_MANIFEST_SIGNATURE_VERSION,
+} from "./updateManifestSignature.js"
 export { UUID } from "./uuid.js"
 export { parseXml, XElement } from "./xml.js"
 export { isValidKey, mapToObject, asArray, Nullish, deepAssign, objectToArgs } from "./objects.js"

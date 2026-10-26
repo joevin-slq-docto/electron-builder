@@ -201,6 +201,25 @@ When `extensions` is empty, electron-builder falls back to the standard Electron
 Start with only the plugs you actually need. Unnecessary plugs may slow Snap Store review. At minimum, `browser-support`, `network`, `desktop`, and `desktop-legacy` are needed for most Electron apps.
 :::
 
+### Plugs
+
+When `plugs` is unset, core24 declares `browser-support`. Without the `gnome` extension it also declares the app-level desktop plugs (`desktop`, `x11`, `wayland`, `home`, `network`, `audio-playback`, …) and, outside destructive mode, the content-snap plugs the extension would otherwise provide (`gnome-46-2404`, `gtk-3-themes`, `icon-themes`, `sound-themes`, `gpu-2404`). Include `"default"` to add plugs to the full default set (the app-level desktop plugs are always part of it); without `"default"`, your list replaces the defaults:
+
+```json
+{
+  "snapcraft": {
+    "base": "core24",
+    "core24": {
+      "plugs": ["default", "camera", { "home": { "read": "all" } }]
+    }
+  }
+}
+```
+
+Entries are deduplicated by plug name, and a descriptor object named like a default plug overrides that plug's attributes. A `null` descriptor resets a default plug named like its interface (`browser-support`) to the snapd defaults, and removes a default content-snap plug (`gtk-3-themes`, `icon-themes`, `sound-themes`, `gnome-46-2404`, `gpu-2404`) from the snap — for example `["default", { "sound-themes": null }]`. The default `layout` binds into `gnome-46-2404` and `gpu-2404`, so set `layout` as well if you remove either of those.
+
+`browser-support` is requested **without** `allow-sandbox`, so the app is launched with `--no-sandbox` and `chrome-sandbox` is left out of the snap; the snap confinement isolates the app. The Snap Store reserves `allow-sandbox` for vetted publishers and rejects other uploads that request it — electron-builder warns if you configure it.
+
 ---
 
 ### Wayland
@@ -263,7 +282,7 @@ Key differences from core24:
 - **`allowNativeWayland` defaults to `false`** — Wayland is disabled by default for older Electron compatibility. Set to `true` to enable. (The legacy interface uses `allowNativeWayland`; core24 uses `forceX11`.)
 - **No extensions** — no GNOME extension support; uses the `desktop-gtk2` part instead.
 - **`useTemplateApp`** — when `stagePackages` is not customised, electron-builder uses a pre-built Electron snap template for faster assembly (x64 and armv7l only).
-- Build is handled by the `app-builder-bin` binary, not by a direct `snapcraft` invocation.
+- **Template builds skip `snapcraft`** — the image is packed directly with the `mksquashfs` from the [`toolsets.appimage`](./toolsets.md) bundle (non-template builds run the `snapcraft` CLI). `compression: "lzo"` needs a toolset other than the legacy `"0.0.0"`, whose `mksquashfs` supports only `gzip` and `xz`.
 
 ---
 
@@ -327,7 +346,7 @@ The `yaml` path is resolved relative to the build resources directory (`build/` 
 ## Migrating from `snap` to `snapcraft`
 
 :::tip[Automated]
-`electron-builder migrate-schema` performs this restructuring for you. If the old config has no `base`, it assumes `core20` and warns so you can confirm. See [v27 Breaking Changes → snap → snapcraft](./migration/v27-breaking-changes.md#snap-snapcraft).
+`electron-builder migrate-schema` performs this restructuring for you. If the old config has no `base`, it assumes `core20` and warns so you can confirm. See [v27 Breaking Changes → snap → snapcraft](./migration/v27-config-changes.md#snap-snapcraft).
 :::
 
 The removed `snap` key is equivalent to using `snapcraft` with a per-core options object. The `base` field moves to the top level of `snapcraft`, and all other fields move inside the corresponding core key.
@@ -443,6 +462,6 @@ snap run --shell myapp
 
   {!./app-builder-lib.Interface.SnapOptionsCustom.md!}
 
-### `snap` (legacy, deprecated)
+### `SnapOptionsLegacy` (core18 / core20 / core22)
 
-  {!./app-builder-lib.Interface.SnapOptions.md!}
+  {!./app-builder-lib.Interface.SnapOptionsLegacy.md!}

@@ -58,11 +58,11 @@ import { configurePublishCommand } from "../../packages/electron-builder/src/pub
 
 // ─── clearCache ───────────────────────────────────────────────────────────────
 
-describe("clearCache", { sequential: true }, () => {
+describe("clearCache", { concurrent: false }, () => {
   beforeEach(() => {
     vi.mocked(getCacheDirectoryInternal).mockReturnValue(Promise.resolve("/home/user/.cache/electron-builder"))
-    vi.mocked(access).mockResolvedValue(undefined as any)
-    vi.mocked(rm).mockResolvedValue(undefined as any)
+    vi.mocked(access).mockResolvedValue(undefined)
+    vi.mocked(rm).mockResolvedValue(undefined)
     vi.mocked(createInterface).mockReturnValue({
       question: vi.fn().mockResolvedValue("y"),
       close: vi.fn(),
@@ -151,7 +151,7 @@ describe("clearCache", { sequential: true }, () => {
 
 // ─── wrap ─────────────────────────────────────────────────────────────────────
 
-describe("wrap", { sequential: true }, () => {
+describe("wrap", { concurrent: false }, () => {
   const savedExitCode = process.exitCode
 
   beforeEach(() => {
@@ -161,7 +161,7 @@ describe("wrap", { sequential: true }, () => {
 
   afterEach(() => {
     delete process.env.NO_UPDATE_NOTIFIER
-    process.exitCode = savedExitCode as any
+    process.exitCode = savedExitCode
     vi.clearAllMocks()
   })
 
@@ -320,6 +320,7 @@ describe("CLI entry points (ESM)", () => {
     expect(out).toContain("build")
     expect(out).toContain("install-app-deps")
     expect(out).toContain("publish")
+    expect(out).toContain("verify")
   })
 
   test("install-app-deps.js exits 0 without ERR_MODULE_NOT_FOUND", () => {

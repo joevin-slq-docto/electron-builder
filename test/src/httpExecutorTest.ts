@@ -1,6 +1,6 @@
 import { expect, test, describe } from "vitest"
 import { CancellationToken, DigestTransform, HttpExecutor } from "builder-util-runtime"
-import { hashSensitiveValue, safeStringifyJson } from "builder-util-runtime/internal"
+import { hashSensitiveValue, REDACTED_VALUE, safeStringifyJson } from "builder-util-runtime/internal"
 import { addSensitiveFieldPattern, addSensitiveRedirectHeader, detectSha512Encoding, isSensitiveFieldName } from "builder-util-runtime/src/httpExecutor"
 import { createHash } from "crypto"
 import { RequestOptions } from "http"
@@ -59,6 +59,29 @@ describe("HttpExecutor.prepareRedirectUrlOptions", () => {
       expect(result.hostname).toBe("objects.githubusercontent.com")
       expect(result.path).toBe("/github-production-release-asset-12345/asset.zip")
     })
+
+    // ElectronHttpExecutor.createRequest moves a `Host` header to `host`, which Electron's net prefers over `hostname`
+    for (const [label, redirectUrl, hostname] of [
+      ["another host", "https://bucket.example.net/app.exe?X-Amz-Signature=abc", "bucket.example.net"],
+      ["the same host", "/files/app.exe", "feed.example.com"],
+    ] as const) {
+      test(`a redirect to ${label} is sent to the redirect target, not to the original \`host\``, () => {
+        const originalOptions: RequestOptions = {
+          protocol: "https:",
+          hostname: "feed.example.com",
+          host: "my-bucket.s3.amazonaws.com",
+          path: "/updates/app.exe",
+          headers: { authorization: "Bearer secret" },
+        }
+
+        const result = HttpExecutor.prepareRedirectUrlOptions(redirectUrl, originalOptions)
+
+        expect(result).not.toHaveProperty("host")
+        expect(result.hostname).toBe(hostname)
+        // the original options are not changed
+        expect(originalOptions.host).toBe("my-bucket.s3.amazonaws.com")
+      })
+    }
   })
 
   describe("authorization header handling", () => {
@@ -677,6 +700,69 @@ describe("sensitive header stripping", () => {
   })
 })
 
+describe("HttpExecutor.removeCrossOriginSensitiveHeaders", () => {
+  const feedUrl = new URL("https://feed.example.com/updates/")
+  const credentialHeaders = () => ({
+    Authorization: "Bearer token123",
+    "PRIVATE-TOKEN": "glpat-secret",
+    "X-Api-Key": "apikey",
+    Cookie: "session=1",
+    "User-Agent": "electron-builder",
+    accept: "*/*",
+  })
+
+  test("strips the sensitive headers for another origin, keeps the rest", () => {
+    const result = HttpExecutor.removeCrossOriginSensitiveHeaders(credentialHeaders(), feedUrl, new URL("https://cdn.example.net/app.exe"))
+    expect(result).toEqual({ "User-Agent": "electron-builder", accept: "*/*" })
+  })
+
+  test("returns the same headers for a same-origin URL", () => {
+    const headers = credentialHeaders()
+    expect(HttpExecutor.removeCrossOriginSensitiveHeaders(headers, feedUrl, new URL("https://feed.example.com/other/app.exe"))).toBe(headers)
+  })
+
+  test("does not mutate its input", () => {
+    const headers = credentialHeaders()
+    HttpExecutor.removeCrossOriginSensitiveHeaders(headers, feedUrl, new URL("https://cdn.example.net/app.exe"))
+    expect(headers).toEqual(credentialHeaders())
+  })
+
+  test("another port on the same host is cross-origin", () => {
+    const result = HttpExecutor.removeCrossOriginSensitiveHeaders(credentialHeaders(), feedUrl, new URL("https://feed.example.com:8443/app.exe"))
+    expect(result.Authorization).toBeUndefined()
+  })
+
+  test("https → http on the same host is cross-origin", () => {
+    const result = HttpExecutor.removeCrossOriginSensitiveHeaders(credentialHeaders(), feedUrl, new URL("http://feed.example.com/updates/app.exe"))
+    expect(result.Authorization).toBeUndefined()
+    expect(result["PRIVATE-TOKEN"]).toBeUndefined()
+  })
+
+  test("http → https upgrade on the same host keeps them (same rule as a redirect)", () => {
+    const headers = credentialHeaders()
+    expect(HttpExecutor.removeCrossOriginSensitiveHeaders(headers, new URL("http://feed.example.com/updates/"), new URL("https://feed.example.com/updates/app.exe"))).toBe(headers)
+  })
+
+  test("a __proto__ key in the headers does not change the prototype of the result", () => {
+    const headers = JSON.parse(`{"__proto__": {"Authorization": "Bearer token123"}, "accept": "*/*"}`)
+    const result = HttpExecutor.removeCrossOriginSensitiveHeaders(headers, feedUrl, new URL("https://cdn.example.net/app.exe"))
+    expect(Object.getPrototypeOf(result)).toBe(Object.prototype)
+    expect(result.Authorization).toBeUndefined()
+    expect(result).toEqual({ accept: "*/*" })
+  })
+})
+
+describe("HttpExecutor.sensitiveHeaderNames", () => {
+  test("names the headers stripped on a cross-origin redirect, whatever their spelling", ({ expect }) => {
+    const headers = { Authorization: "Bearer t", private_token: "p", "X-Api-Key": "k", "User-Agent": "electron-builder", accept: "*/*" }
+    expect(HttpExecutor.sensitiveHeaderNames(headers)).toEqual(["Authorization", "private_token", "X-Api-Key"])
+  })
+
+  test("ignores a sensitive header without a value", ({ expect }) => {
+    expect(HttpExecutor.sensitiveHeaderNames({ authorization: undefined, accept: "*/*" })).toEqual([])
+  })
+})
+
 describe("safeStringifyJson field redaction", () => {
   test("strips token variants", () => {
     const data = { token: "x", TOKEN: "x", access_token: "x", ACCESS_TOKEN: "x", refreshToken: "x" }
@@ -885,7 +971,40 @@ describe("HttpExecutor redirect limit", () => {
     await expect(executor.doApiRequest({ protocol: "https:", hostname: "example.com", path: "/start" }, new CancellationToken(), request => request.end())).rejects.toThrow(
       /Too many redirects/
     )
-    // guard is `redirectCount > maxRedirects`, allowing one extra hop before rejecting
-    expect(executor.requestCount).toBe(executor["maxRedirects"] + 2)
+    // Same limit as doDownload: maxRedirects recursions + the initial request
+    expect(executor.requestCount).toBe(executor["maxRedirects"] + 1)
+  })
+})
+
+describe("hashSensitiveValue", () => {
+  const FINGERPRINT = /^[a-f0-9]{32} \(redacted fingerprint\)$/
+
+  test("maps the same value to the same fingerprint within a run, and different values to different ones", ({ expect }) => {
+    const first = hashSensitiveValue("hunter2")
+    expect(first).toMatch(FINGERPRINT)
+    expect(hashSensitiveValue("hunter2")).toBe(first)
+    expect(hashSensitiveValue("hunter3")).not.toBe(first)
+    expect(hashSensitiveValue("")).toMatch(FINGERPRINT)
+  })
+
+  // a plain (unkeyed) hash of a weak secret in a log could be checked against guesses offline
+  test("is not a plain hash of the value, and does not contain it", ({ expect }) => {
+    const output = hashSensitiveValue("hunter2")
+    const fingerprint = output.split(" ")[0]
+    for (const algorithm of ["sha256", "sha1", "md5"]) {
+      const digest = createHash(algorithm).update("hunter2").digest("hex")
+      expect(output).not.toContain(digest)
+      expect(digest.startsWith(fingerprint)).toBe(false)
+    }
+    expect(output).not.toContain("hunter2")
+  })
+
+  test("never throws: a value that cannot be read is logged as a constant", ({ expect }) => {
+    const unreadable = {
+      toString() {
+        throw new Error("boom")
+      },
+    }
+    expect(hashSensitiveValue(unreadable as unknown as string)).toBe(REDACTED_VALUE)
   })
 })

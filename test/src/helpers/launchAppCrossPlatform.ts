@@ -8,6 +8,7 @@ import * as http from "http"
 import * as net from "net"
 import os, { homedir } from "os"
 import path from "path"
+import { retry } from "builder-util"
 
 /**
  * Returns the macOS host's IP address on the Parallels virtual network.
@@ -39,8 +40,10 @@ export function getParallelsHostIP(): string | undefined {
   return undefined
 }
 
-export function createLocalServer(root: string, bindAddress = "127.0.0.1"): Promise<{ server: http.Server; port: number }> {
+/** `onRequest` receives the URL of every request (e.g. to assert which files an installer downloaded). */
+export function createLocalServer(root: string, bindAddress = "127.0.0.1", onRequest?: (url: string) => void): Promise<{ server: http.Server; port: number }> {
   const server = http.createServer((req, res) => {
+    onRequest?.(req.url!)
     const pathname = decodeURIComponent(new URL(req.url!, "http://localhost").pathname).replace(/^\/+/, "")
     const filePath = path.resolve(root, pathname)
     if (!filePath.startsWith(path.resolve(root) + path.sep) && filePath !== path.resolve(root)) {
@@ -235,7 +238,20 @@ export async function launchAndWaitForQuit({
     }
 
     case "win32": {
-      child = spawnApp(appPath)
+      // Windows refuses to start an executable that another process still holds open: spawn() throws EBUSY (a sharing
+      // violation). That happens right after an installer wrote the app, while e.g. an antivirus scan of the new file or the
+      // installer's teardown still has it open, so the launch is retried for a while instead of failing the test on it.
+      child = await retry(async () => spawnApp(appPath), {
+        retries: 30,
+        interval: 1000,
+        shouldRetry: (e: any) => {
+          const isBusy = e?.code === "EBUSY"
+          if (isBusy) {
+            console.log(`${appPath} is busy (spawn EBUSY), retrying the launch in 1s`)
+          }
+          return isBusy
+        },
+      })
       break
     }
 

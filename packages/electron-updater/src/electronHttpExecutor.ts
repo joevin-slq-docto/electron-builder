@@ -76,23 +76,88 @@ export class ElectronHttpExecutor extends HttpExecutor<Electron.ClientRequest> {
     return request
   }
 
-  protected addRedirectHandlers(
-    request: ClientRequest,
-    options: RequestOptions,
-    reject: (error: Error) => void,
-    redirectCount: number,
-    handler: (options: RequestOptions) => void
-  ): void {
+  /**
+   * Electron's `net` requests never emit `socket`, so the timeout armed by the base class (a socket timeout) never starts and a
+   * stalled request would wait forever. An idle timer replaces it: restarted by every sign of progress (the response, a redirect,
+   * a body chunk), it aborts the request with "Request timed out" after `timeout` ms without any, until the response ends or
+   * the request fails or is aborted.
+   */
+  addErrorAndTimeoutHandlers(request: any, reject: (error: Error) => void, timeout = 60 * 1000): void {
+    super.addErrorAndTimeoutHandlers(request, reject, timeout)
+    // like socket.setTimeout, 0 (or no number) disables the timeout
+    if (typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0) {
+      addIdleTimeout(request, reject, timeout)
+    }
+  }
+
+  /**
+   * A redirect aborts `request` and `handler` sends a new one to the target: followRedirect() would resend every header,
+   * while {@link HttpExecutor.prepareRedirectUrlOptions} leaves out the credential headers when the target is on another origin.
+   * Up to `maxRedirects` redirects are followed; `redirectCount` is the number already followed. A redirect to a protocol other than
+   * http(s) is rejected, and so is anything `handler` throws.
+   */
+  addRedirectHandlers(request: ClientRequest, options: RequestOptions, reject: (error: Error) => void, redirectCount: number, handler: (options: RequestOptions) => void): void {
     request.on("redirect", (statusCode: number, method: string, redirectUrl: string) => {
       // no way to modify request options, abort old and make a new one
       // https://github.com/electron/electron/issues/11505
       request.abort()
 
-      if (redirectCount > this.maxRedirects) {
+      if (redirectCount >= this.maxRedirects) {
         reject(this.createMaxRedirectError())
-      } else {
-        handler(HttpExecutor.prepareRedirectUrlOptions(redirectUrl, options))
+        return
+      }
+      // an event listener: a throw (from preparing the options, or from the handler, which sends the new request) would escape as an
+      // uncaught exception and the request would never settle
+      try {
+        const redirectOptions = HttpExecutor.prepareRedirectUrlOptions(redirectUrl, options)
+        // net.request throws for another protocol, where Electron following the redirect itself fails the request
+        if (redirectOptions.protocol !== "http:" && redirectOptions.protocol !== "https:") {
+          throw new Error(`Cannot follow the redirect to the "${redirectOptions.protocol ?? ""}" protocol`)
+        }
+        handler(redirectOptions)
+      } catch (e: unknown) {
+        reject(e instanceof Error ? e : new Error(`Cannot follow the redirect: ${String(e)}`))
       }
     })
   }
+}
+
+function addIdleTimeout(request: ClientRequest, reject: (error: Error) => void, timeout: number): void {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let isDone = false
+  const stop = (): void => {
+    isDone = true
+    if (timer != null) {
+      clearTimeout(timer)
+      timer = null
+    }
+  }
+  const restart = (): void => {
+    if (isDone) {
+      return
+    }
+    if (timer != null) {
+      clearTimeout(timer)
+    }
+    timer = setTimeout(() => {
+      timer = null
+      isDone = true
+      request.abort()
+      reject(new Error("Request timed out"))
+    }, timeout)
+  }
+
+  request.on("response", response => {
+    restart()
+    // added after the response handler, which pipes or reads the body synchronously, so this does not change how the body flows
+    response.on("data", restart)
+    response.on("end", stop)
+    response.on("error", stop)
+    response.on("aborted", stop)
+  })
+  request.on("redirect", restart)
+  request.on("abort", stop)
+  request.on("error", stop)
+  // not "close": with autoDestroy, Electron emits it as soon as the request body is sent, long before the response
+  restart()
 }

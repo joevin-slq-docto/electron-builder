@@ -9,7 +9,7 @@ import {
   installOrRebuild,
   PACKAGE_VERSION,
 } from "app-builder-lib/internal"
-import { getArchCliNames, log, printErrorAndExit } from "builder-util"
+import { Executables, getArchCliNames, log, printErrorAndExit } from "builder-util"
 
 import { fileURLToPath } from "node:url"
 import { hideBin } from "yargs/helpers"
@@ -52,29 +52,33 @@ export async function installAppDeps(args: any) {
   const [appDir, version] = await Promise.all<string>([computeDefaultAppDirectory(projectDir, config.directories?.app), getElectronVersion(projectDir, config)])
 
   const packageManagerEnv = determinePackageManagerEnv({ projectDir, appDir, workspaceRoot: undefined })
+  const workspaceRoot = await (await packageManagerEnv.value).workspaceRoot
 
-  // if two package.json — force full install (user wants to install/update app deps in addition to dev)
-  await installOrRebuild(
-    config,
-    {
-      appDir,
-      projectDir,
-      workspaceRoot: await (await packageManagerEnv.value).workspaceRoot,
-    },
-    {
-      frameworkInfo: { version, useCustomDist: true },
-      platform: args.platform,
-      arch: args.arch,
-    },
-    appDir !== projectDir,
-    {}
+  // if two package.json — force full install (user wants to install/update app deps in addition to dev). On Windows the package
+  // manager runs in Windows PowerShell, from the configuration's toolsets.executables.powershell or its default location
+  await Executables.run(config.toolsets?.executables, () =>
+    installOrRebuild(
+      config,
+      {
+        appDir,
+        projectDir,
+        workspaceRoot,
+      },
+      {
+        frameworkInfo: { version, useCustomDist: true },
+        platform: args.platform,
+        arch: args.arch,
+      },
+      appDir !== projectDir,
+      {}
+    )
   )
 }
 
 function main() {
   const factory = (yargs as any).default ?? yargs
   const instance = typeof factory?.parserConfiguration === "function" ? factory : factory(hideBin(process.argv))
-  return installAppDeps(configureInstallAppDepsCommand(instance as unknown as yargs.Argv).argv)
+  return installAppDeps(configureInstallAppDepsCommand(instance).argv)
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

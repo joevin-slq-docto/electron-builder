@@ -1,5 +1,6 @@
+import { deepAssign } from "builder-util-runtime"
 import { expect } from "vitest"
-import { assertSafeHelperName, getAvailableHelperSuffixes, type AvailableHelpers } from "app-builder-lib/internal"
+import { assertSafeHelperName, configureLocalhostAts, getAvailableHelperSuffixes, type AvailableHelpers } from "app-builder-lib/internal"
 
 describe("electronMacUtils", () => {
   describe("assertSafeHelperName", () => {
@@ -55,6 +56,45 @@ describe("electronMacUtils", () => {
 
     test("ignores falsy flags", () => {
       expect(getAvailableHelperSuffixes({ EH: false, GPU: undefined })).toEqual([" Helper"])
+    })
+  })
+
+  describe("configureLocalhostAts", () => {
+    test("adds local networking, arbitrary loads and localhost exceptions to an empty plist", () => {
+      const plist: any = {}
+      configureLocalhostAts(plist)
+      expect(plist.NSAppTransportSecurity.NSAllowsLocalNetworking).toBe(true)
+      expect(plist.NSAppTransportSecurity.NSAllowsArbitraryLoads).toBe(true)
+      expect(plist.NSAppTransportSecurity.NSExceptionDomains.localhost.NSTemporaryExceptionAllowsInsecureHTTPLoads).toBe(true)
+      expect(plist.NSAppTransportSecurity.NSExceptionDomains["127.0.0.1"]).toEqual(plist.NSAppTransportSecurity.NSExceptionDomains.localhost)
+    })
+
+    test("keeps an explicit NSAllowsArbitraryLoads: false from extendInfo", () => {
+      const plist: any = { NSAppTransportSecurity: { NSAllowsArbitraryLoads: false } }
+      configureLocalhostAts(plist)
+      expect(plist.NSAppTransportSecurity.NSAllowsArbitraryLoads).toBe(false)
+      expect(plist.NSAppTransportSecurity.NSAllowsLocalNetworking).toBe(true)
+      expect(plist.NSAppTransportSecurity.NSExceptionDomains.localhost).toBeDefined()
+    })
+
+    // the order electronMac.ts applies them in: Electron's stock Info.plist, then mac.extendInfo (deepAssign), then this
+    test("an extendInfo false overrides Electron's stock NSAllowsArbitraryLoads: true and is kept", () => {
+      const plist: any = deepAssign({ NSAppTransportSecurity: { NSAllowsArbitraryLoads: true } }, { NSAppTransportSecurity: { NSAllowsArbitraryLoads: false } })
+      configureLocalhostAts(plist)
+      expect(plist.NSAppTransportSecurity.NSAllowsArbitraryLoads).toBe(false)
+    })
+
+    test("an extendInfo null cannot remove NSAllowsArbitraryLoads: it is set to true again", () => {
+      const plist: any = deepAssign({ NSAppTransportSecurity: { NSAllowsArbitraryLoads: true } }, { NSAppTransportSecurity: { NSAllowsArbitraryLoads: null } })
+      configureLocalhostAts(plist)
+      expect(plist.NSAppTransportSecurity.NSAllowsArbitraryLoads).toBe(true)
+    })
+
+    test("keeps an existing localhost exception", () => {
+      const custom = { NSTemporaryExceptionAllowsInsecureHTTPLoads: false }
+      const plist: any = { NSAppTransportSecurity: { NSExceptionDomains: { localhost: custom } } }
+      configureLocalhostAts(plist)
+      expect(plist.NSAppTransportSecurity.NSExceptionDomains.localhost).toBe(custom)
     })
   })
 })

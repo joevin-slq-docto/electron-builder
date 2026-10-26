@@ -1,5 +1,7 @@
 import { parseDn } from "builder-util-runtime"
 import { WinPackager } from "app-builder-lib"
+import { SigningResult } from "app-builder-lib/src/codeSign/signResult"
+import { AuthenticodeSignerInfo } from "app-builder-lib/src/codeSign/win/authenticodeSignature"
 import { WindowsSigntoolSigningConfig } from "app-builder-lib/src/options/winOptions"
 import { Configuration, CustomWindowsSign } from "app-builder-lib/internal"
 import { AsyncTaskManager } from "builder-util"
@@ -29,6 +31,12 @@ function makeSignQueueTestPackager(signIfResults: SignIfResult[]) {
   return class SignQueueTestPackager extends WinPackager {
     constructor(info: Packager) {
       super(info)
+    }
+
+    // the no-op hook never really signs these (nonexistent) files: report them signed, so that the forceCodeSigning
+    // read-back - which fails on Windows for an unsigned file - leaves the queue behavior under test alone
+    protected readAuthenticodeSignature(): Promise<AuthenticodeSignerInfo> {
+      return Promise.resolve({ type: "signed", subject: "CN=Test", status: 0 })
     }
 
     async pack(outDir: string, _arch: Arch, _targets: Array<Target>, _taskManager: AsyncTaskManager): Promise<void> {
@@ -198,7 +206,7 @@ describe("signing queue", () => {
 
 describe("sign: false (signing disabled)", () => {
   test("signIf skips every file even when a cert is discoverable via env", async ({ expect }) => {
-    const signResults: boolean[] = []
+    const signResults: SigningResult[] = []
 
     class SignDisabledTestPackager extends WinPackager {
       async pack(outDir: string, _arch: Arch, _targets: Array<Target>, _taskManager: AsyncTaskManager): Promise<void> {
@@ -223,6 +231,6 @@ describe("sign: false (signing disabled)", () => {
       { signedWin: true }
     )
 
-    expect(signResults).toEqual([false, false, false])
+    expect(signResults).toEqual(["skipped:disabled", "skipped:disabled", "skipped:disabled"])
   })
 })

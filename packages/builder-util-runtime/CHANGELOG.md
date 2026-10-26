@@ -1,5 +1,125 @@
 # builder-util-runtime
 
+## 10.0.0-alpha.12
+### Major Changes
+
+- Feat(win)!: `matchPublisherName` matches only publisher names that are a distinguished name (DN), every attribute of which must equal the signer's; a bare name never matches the signer's Common Name any more, and its `logger` parameter is removed. New export `isValidPublisherNameDn` tells whether a publisher name is a DN. See https://www.electron.build/docs/migration/v27-build-changes#windows-publishername-must-be-a-distinguished-name _[`#10380`](https://github.com/electron-userland/electron-builder/pull/10380) [`674e18d`](https://github.com/electron-userland/electron-builder/commit/674e18dd3e6d2720c46b42ce309cac83ae760e14)_
+- Refactor(win)!: remove the `escapePowerShellSingleQuotes` export, which only shipped in 10.0.0-alpha.11; the Authenticode check passes the file path to PowerShell in an environment variable (`prepareAuthenticodeSignatureExec`), so no path is quoted into a PowerShell script. _[`#10453`](https://github.com/electron-userland/electron-builder/pull/10453) [`ed05bd0`](https://github.com/electron-userland/electron-builder/commit/ed05bd0f734dd3b898b9c43c81abd56c08d242ef)_
+
+### Minor Changes
+
+- Feat(runtime): `HttpExecutor.addRedirectHandlers` is public, so that requests made outside the executor (electron-updater's differential downloads) follow redirects with the same rules: credential headers are dropped on another origin, and the executor's redirect limit applies _[`#10419`](https://github.com/electron-userland/electron-builder/pull/10419) [`2d97c85`](https://github.com/electron-userland/electron-builder/commit/2d97c85e3e3e63aade6497923d3012ce0569e414)_
+- Feat(win)!: a missing `publisherName` fails Windows update signature verification closed. _[`#10380`](https://github.com/electron-userland/electron-builder/pull/10380) [`674e18d`](https://github.com/electron-userland/electron-builder/commit/674e18dd3e6d2720c46b42ce309cac83ae760e14)_
+
+  - **electron-updater**: an NSIS update is rejected with `ERR_UPDATER_INVALID_SIGNATURE` when `app-update.yml` (or `dev-app-update.yml` / the `updateConfigPath` file) has no `publisherName`. A custom `verifyUpdateFileAuthenticodeSignature` / `verifyUpdateCodeSignature` is never called without a `publisherName`. The only opt-out is `verifyUpdateCodeSignature: false` in `app-update.yml`, which electron-builder writes for `win.verifyUpdateCodeSignature: false`; verification is then skipped with one warning per updater. An app with no update config file at all (no `app-update.yml` / `dev-app-update.yml`, e.g. one that only uses `setFeedURL`) is not verified: its feed is configured by the developer.
+  - **app-builder-lib**: a Windows build that writes `app-update.yml` (`nsis`, `nsis-web` or `electronUpdaterAware` `appx` with a publish configuration of any provider, including one inferred from a GitHub `repository`) fails with `InvalidConfigurationError` while `win.verifyUpdateCodeSignature` is enabled and no `publisherName` resolves: `win.sign: false` / `null`, no code signing certificate, or `win.sign.publisherName: null`, which is not an opt-out. Sign the build, set `win.sign.publisherName` (e.g. `win.sign: { type: "signtool", publisherName: [...] }` when signing outside electron-builder), or set `win.verifyUpdateCodeSignature: false`, which writes `verifyUpdateCodeSignature: false` (and no `publisherName`) into `app-update.yml`. A `publisherName` in the `publish` configuration must be a distinguished name too, and `verifyUpdateCodeSignature` must not be set there.
+  - **builder-util-runtime**: `PublishConfiguration` has the private, Windows-only `verifyUpdateCodeSignature` field.
+  - **electron-builder**: `migrate-schema` prints an advisory for `win.sign: false` / `null` or `win.sign.publisherName: null` without `win.verifyUpdateCodeSignature: false`.
+
+  See https://www.electron.build/docs/migration/v27-build-changes#missing-publishername-fails-update-verification
+- Feat(win): export `windowsPowerShellPath()`, which returns the absolute path of the in-box Windows PowerShell (`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`) for runtime use such as electron-updater, and throws when `SystemRoot` is not a drive-absolute path. `preparePowerShellExec` and `prepareAuthenticodeSignatureExec` take an optional PowerShell path, used instead of `windowsPowerShellPath()` when given. _[`#10453`](https://github.com/electron-userland/electron-builder/pull/10453) [`ed05bd0`](https://github.com/electron-userland/electron-builder/commit/ed05bd0f734dd3b898b9c43c81abd56c08d242ef)_
+- Feat(updater)!: Windows update signature verification fails closed — electron-updater installs an NSIS update only when PowerShell (`Get-AuthenticodeSignature`) verifies it: an update it cannot verify (PowerShell cannot be started or run, times out, or prints unreadable output) is rejected with `ERR_UPDATER_SIGNATURE_UNVERIFIABLE`, and a Windows catalog signature is rejected as invalid unless the app opts in with the new `NsisUpdater.allowCatalogSignature` (default `false`; when `true`, a valid catalog signature is accepted with a warning only when its signer matches `publisherName`). A release can allow it instead with the new `win.allowCatalogSignature` build option (default `false`), which writes `allowCatalogSignature: true` into the `latest.yml` of the `nsis` and `nsis-web` targets; electron-updater honors it only when that manifest's signature was verified against a trusted key (`updateManifestPublicKey`) and ignores it with a warning otherwise. The manifest signature covers it as an extra `allowCatalogSignature:true` line of the `EBUM1` payload only when it is `true`, so manifests without it canonicalize and verify exactly as before, and changing it for a published release means re-signing or republishing `latest.yml`; a signed manifest with a non-boolean `allowCatalogSignature` is rejected. electron-updater 7.0.0-alpha.8 to alpha.11 installs with an update key configured reject a signed manifest that sets it (`ERR_UPDATER_MANIFEST_SIGNATURE_INVALID`), the same way alpha.8 treats a signed `files[].blockMapUrl`. `UpdateInfoAndProvider` gains `manifestSignatureVerified`, and `BaseUpdater.verifyInstallerSignatureOnLaunch` receives the update info the cached installer was matched against. PowerShell is started by absolute path, the installer path is passed in an environment variable, and non-ASCII output is escaped instead of setting a console encoding, so verification works under PowerShell Constrained Language Mode (fixing 7.0.0-alpha.8 to alpha.10). The build-time installer check uses the same invocation. builder-util-runtime adds `prepareAuthenticodeSignatureExec` and `POWERSHELL_ASCII_ESCAPE_FUNCTION`. Migration: where PowerShell may be blocked (AppLocker / WDAC), assign a native `verifyUpdateFileAuthenticodeSignature` in your first electron-updater 7 release — see https://www.electron.build/docs/migration/v27-runtime-changes#windows-update-signature-verification-fails-closed _[`#10416`](https://github.com/electron-userland/electron-builder/pull/10416) [`8366dc6`](https://github.com/electron-userland/electron-builder/commit/8366dc690ba5bc453c45f6ebbb8f8ad3561521df)_
+
+### Patch Changes
+
+- Fix: escaped characters in a Windows `publisherName` distinguished name are decoded correctly. Before, a hex pair was decoded as a single Latin-1 character (`Caf\C3\A9` became `CafÃ©` instead of `Café`), and a `\+` or `\ ` escape followed by a hex digit was read as a hex pair (`Acme\+Bolt` lost the `B`), so such a publisher name never matched the signing certificate and electron-updater rejected the update _[`#10434`](https://github.com/electron-userland/electron-builder/pull/10434) [`6393d7a`](https://github.com/electron-userland/electron-builder/commit/6393d7ae75d15da5147691b135c5bcc7aa520f35)_
+- Fix: Fall back to Latin-1 when a hex escape in a distinguished name is not valid UTF-8 _[`#10446`](https://github.com/electron-userland/electron-builder/pull/10446) [`5028cb3`](https://github.com/electron-userland/electron-builder/commit/5028cb37a21b8bdd6d9447e858eacfb8e3834004)_
+- Fix: secrets in logs and error messages (passwords, tokens and keys in redacted command lines, environments and request options) are shown as a fingerprint keyed with a random secret of the process, derived with scrypt: the same value has the same fingerprint within a run, but a fingerprint cannot be checked against guessed values offline. A value whose fingerprint cannot be computed is shown as `<redacted>`. _[`#10441`](https://github.com/electron-userland/electron-builder/pull/10441) [`955cd00`](https://github.com/electron-userland/electron-builder/commit/955cd00bd32f4dff0fd5f120b5c7bdad92ea1d7f)_
+- Fix(runtime): `HttpExecutor.prepareRedirectUrlOptions` leaves out `host`, so a redirected request goes to the redirect target even when the original request set `host` (ElectronHttpExecutor sets it from a `Host` header) _[`#10419`](https://github.com/electron-userland/electron-builder/pull/10419) [`2d97c85`](https://github.com/electron-userland/electron-builder/commit/2d97c85e3e3e63aade6497923d3012ce0569e414)_
+- Start system tools by absolute path instead of looking them up on `PATH`: Windows PowerShell from `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` (for Windows code signing, package-manager commands and `create-self-signed-cert`), PowerShell 7 from `%ProgramFiles%\PowerShell\7\pwsh.exe` on Windows and from the install location of Microsoft's package on macOS and Linux, `prlctl` from the Parallels Desktop install location, and the host Wine (`toolsets.wine: "system"`, the default) from its fixed install locations. `SystemRoot` and `ProgramFiles` must be drive-absolute paths. _[`#10422`](https://github.com/electron-userland/electron-builder/pull/10422) [`a7f005c`](https://github.com/electron-userland/electron-builder/commit/a7f005ce837df409cc7cf9049e3eff74a2d5a503)_
+
+## 10.0.0-alpha.11
+### Minor Changes
+
+- Feat(s3)!: explicit AWS credential sources for S3 publishing via the new `awsCredentials` option (restores shared config / IAM Identity Center profiles, #10054) _[`#10257`](https://github.com/electron-userland/electron-builder/pull/10257) [`46be1f4`](https://github.com/electron-userland/electron-builder/commit/46be1f48e51a59b846ca76e631fc9e4e33348fb5)_
+
+  - `awsCredentials.source` is required to publish (no default, no implicit credentials).
+  - `awsCredentials.source: "env"` reads only `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`, or the variable names given in `awsCredentials.env`.
+  - `awsCredentials.source: "profile"` with `profile` (plus optional `credentialsFile` / `configFile`) reads a named profile from the shared config and credentials files: static keys, IAM Identity Center (SSO), `credential_process` and assume-role. The AWS SDK providers are loaded lazily, only for non-static profiles, and are given explicit paths. Assume-role hops use an explicitly configured STS client (named profile's region, no configured endpoint URLs). `credential_source` and web identity (`web_identity_token_file`) are rejected anywhere in the chain, before the SDK is loaded.
+  - `awsCredentials.source: "sso-role-chain"` with `profile` resolves an assume-role profile whose `source_profile` chain (up to 5 hops, no cycles) starts at an IAM Identity Center (SSO) profile: the SSO profile is resolved from the configured files, then STS AssumeRole is called per hop with explicit region, endpoint and credentials (never `AWS_REGION`, `AWS_PROFILE` or `AWS_ENDPOINT_URL*`). `credential_source`, `mfa_serial`, web identity and `credential_process` are rejected in the chain. `source: "profile"` keeps rejecting SSO-sourced role chains and points to this source.
+  - Resolved credentials are reused for every file of a publish instead of being resolved again per upload.
+
+  BREAKING CHANGE: S3 publishing fails with an InvalidConfigurationError unless `awsCredentials.source` is set (add `{ "source": "env" }` to keep using `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`). `AWS_PROFILE`, `AWS_SDK_LOAD_CONFIG`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE` and an implicit `~/.aws/credentials` are no longer read. Missing credentials now fail with a clear error instead of an unsigned or env-fallback signature. For dotted bucket names without `region`, the region is looked up only when publishing. `awsCredentials` is never written to `app-update.yml`.
+
+### Patch Changes
+
+- Fix: preserve complete XML text and reject incomplete documents _[`#10125`](https://github.com/electron-userland/electron-builder/pull/10125) [`45d3bc4`](https://github.com/electron-userland/electron-builder/commit/45d3bc431b5274b38b6b50b0b299d9ae6575469b)_
+- Fix(updater): download differentially when the update manifest has a hex-encoded sha512, never let a throwing logger stop a differential download or its fallback to a full download, time out stalled requests made with Electron's `net` module, and close the partially written file when a download's response fails or is aborted mid-body _[`#10366`](https://github.com/electron-userland/electron-builder/pull/10366) [`538aef4`](https://github.com/electron-userland/electron-builder/commit/538aef405d68940cb1322147ab050c24eb581342)_
+- Fix: enforce the configured API redirect limit without an extra hop _[`#10121`](https://github.com/electron-userland/electron-builder/pull/10121) [`8b71ed8`](https://github.com/electron-userland/electron-builder/commit/8b71ed87224beed7c0674fdd312d54047095d965)_
+- Fix: report finite transfer rates for immediate downloads _[`#10122`](https://github.com/electron-userland/electron-builder/pull/10122) [`370d18c`](https://github.com/electron-userland/electron-builder/commit/370d18cb25e18b204d9ddbaf010879f8939cbeef)_
+- Refactor(win): export the Windows Authenticode helpers electron-updater verifies update signatures with (`preparePowerShellExec`, `escapePowerShellSingleQuotes`, `parseAuthenticodeSignatureOutput`, `matchPublisherName`), moved unchanged from electron-updater so electron-builder can check signed installers with the same code _[`#10378`](https://github.com/electron-userland/electron-builder/pull/10378) [`60e3708`](https://github.com/electron-userland/electron-builder/commit/60e3708955724138009f157cf0ad3f80a36ddeae)_
+
+## 10.0.0-alpha.10
+### Minor Changes
+
+- Feat(builder-util): `log.limit({ key, max, scope })` / `log.once(key, scope)` emit a keyed message at most N times (per process, or per scope object), replacing hand-rolled "already warned" flags; electron-updater counts once-per-updater warnings internally without changing the injectable `Logger` interface. Both share one limiter (`wrap()` on any `{ info, warn, error, debug? }` logger, including `console`), and its `LogLevel`, `LogLimitOptions`, `LoggerLike` and `LimitedLogger` types are now exported from builder-util-runtime (builder-util re-exports them) _[`#10302`](https://github.com/electron-userland/electron-builder/pull/10302) [`5cbbc8d`](https://github.com/electron-userland/electron-builder/commit/5cbbc8de8e0fb585cfa97e80644e8a29ab7d8ff4)_
+
+### Patch Changes
+
+- Fix: stop retry backoff immediately when cancelled _[`#10126`](https://github.com/electron-userland/electron-builder/pull/10126) [`68aa2ff`](https://github.com/electron-userland/electron-builder/commit/68aa2ff1d5bc713819cd98bfb34c890fbe03a93a)_
+- Fix(docs): repair broken links and anchors across the docs site and JSDoc, and export the `SnapOptions24`, `SnapOptionsLegacy`, `SnapOptionsCustom` and `RemoteBuildOptions` types from `app-builder-lib` so their API reference pages are generated _[`#10305`](https://github.com/electron-userland/electron-builder/pull/10305) [`2fdbcae`](https://github.com/electron-userland/electron-builder/commit/2fdbcae5b136c486d3afa3e564d032b5a79dae05)_
+- Feat!: nest `files`, `extraResources` and `extraFiles` under `fileOptions` _[`#10319`](https://github.com/electron-userland/electron-builder/pull/10319) [`8f55928`](https://github.com/electron-userland/electron-builder/commit/8f5592839b6b2752754c19b8b7190ec86f55ef94)_
+
+  The three file-copy lists live in a `fileOptions?: FilesBuildOptions | null` property at the configuration root and in every platform section (`mac`, `mas`, `masDev`, `win`, `linux`), the same way `directories` groups the build directories: `fileOptions.files`, `mac.fileOptions.extraResources`, and so on. `PlatformSpecificBuildOptions` does not extend `FilesBuildOptions`, and the TypeScript types and the JSON schema only have `fileOptions`.
+
+  Flat `files` / `extraResources` / `extraFiles` keys in a config file, an `extends` parent, a `-c.files=…` override or the `config` object passed to `build()` are applied as their `fileOptions` counterparts before the configuration is validated, logging one warning per process that names the keys found and where they belong. When a flat key and its `fileOptions` counterpart are set on the same object, `fileOptions` wins and the build warns about the conflict. A CLI override or a parent config's flat key is merged with `fileOptions`. A `fileOptions` that is not an object (for example a list of globs written directly under it) fails the build with a message showing the nested form.
+
+  Code that reads `files`, `extraResources` or `extraFiles` from the loaded configuration (for example a hook reading `context.packager.config.files`, or `buildResult.configuration.extraResources`) gets the `fileOptions` value, with a warning per key: the loaded configuration and its platform sections forward these reads through non-enumerable properties, which stay out of the effective config, `JSON.stringify` and `Object.keys`. Assigning them throws a configuration error naming the `fileOptions` property to set instead.
+
+  `deepAssign` (builder-util-runtime) copies only enumerable own properties, so the forwarding properties are never copied into merged options.
+
+  `electron-builder migrate-schema` (static and JS/TS configs) moves flat keys under `fileOptions` at the root and per platform. A flat key also set under `fileOptions` is removed with a warning, since the build ignores it.
+
+  See https://www.electron.build/docs/migration/v27-breaking-changes#file-options-fileoptions
+- Docs: document `files[].isAdminRightsRequired` as an intentionally unsigned launch hint in signed update manifests. It only selects how the hash-verified installer is launched (directly or via `elevate.exe`), so publishers can correct it in `latest.yml` without re-signing. _[`#10318`](https://github.com/electron-userland/electron-builder/pull/10318) [`434f6e9`](https://github.com/electron-userland/electron-builder/commit/434f6e98b017c14176be9aaf06891f09624c88fc)_
+
+## 10.0.0-alpha.9
+
+### Minor Changes
+
+- Feat(updater): optional `files[].blockMapUrl` in `latest*.yml` names a file's blockmap URL (e.g. a separately pre-signed one) instead of `${url}.blockmap` with the file URL's query string. A relative value resolves like `url` (against the feed URL); an absolute URL is used as-is, with its own host and query string. It gets the feed query and credential headers only on the feed's origin. With a `blockMapUrl`, the old blockmap is not derived from the new file's URL: it comes from the local cache, else from `previousBlockmapBaseUrlOverride`, else that update is downloaded in full (which caches the new blockmap). The manifest signature covers `blockMapUrl` when present, as an extra field on the file record, so manifests without it canonicalize and verify exactly as before; an electron-updater without this change refuses a signed manifest that has one. electron-builder does not write it. The private GitHub and GitLab providers, which resolve files from the release assets, ignore it. _[`#10270`](https://github.com/electron-userland/electron-builder/pull/10270) [`ec9135d`](https://github.com/electron-userland/electron-builder/commit/ec9135d0626879479ffa4235006f06b14375cc43) [@mmaietta](https://github.com/mmaietta)_
+- Feat!: electron-updater sends update-feed credentials only to downloads on the feed's origin. With the generic, s3, spaces, r2, keygen, bitbucket, github and gitlab providers, a download on another origin than the feed (scheme, host or port) — an absolute `files[].url` or `packages.<arch>.path` in `latest*.yml`, a GitLab release asset link, and the blockmaps and differential range requests derived from them — is requested without the credential headers from `requestHeaders` / `addAuthHeader` (headers such as `Authorization`, the same set that is removed on a cross-origin redirect) and without the feed URL's query string. Such a URL keeps its own query string, so pre-signed URLs work. With every provider, including custom ones, a URL that electron-updater resolves against the feed URL (such as a `files[].url` or a blockmap) gets the feed query only on the feed's origin; as on redirects, an `http` → `https` upgrade of the feed host on the default ports keeps the headers and the query. Downloads on the feed origin are unchanged, and the old blockmap from an app-set `previousBlockmapBaseUrlOverride` keeps the credentials on that origin. If your `latest*.yml` points downloads at another origin that needs these credentials, serve the files from the feed origin or use pre-signed URLs. The NSIS web-package differential download now uses the same per-download headers as other downloads. A custom provider that does not extend a built-in one must declare `Provider.feedBaseUrl` — its feed URL (the credential headers then only go to that origin) or `null` (the request headers go to every download URL) — when the download headers include a credential header: if it does not, `downloadUpdate()` fails with `ERR_UPDATER_FEED_BASE_URL_NOT_DECLARED` before any download request. The first download that loses the credential headers, and the first that does not get the feed query, each log a warning once per updater, naming the headers, the query parameters and the origins (never their values), with a link to the migration guide; `ERR_UPDATER_FEED_BASE_URL_NOT_DECLARED` links it too. New APIs: `Provider.feedBaseUrl` (`undefined`, not declared, by default), `HttpExecutor.sensitiveHeaderNames`, `HttpExecutor.removeCrossOriginSensitiveHeaders` and `HttpExecutor.isCrossOrigin`. _[`#10270`](https://github.com/electron-userland/electron-builder/pull/10270) [`ec9135d`](https://github.com/electron-userland/electron-builder/commit/ec9135d0626879479ffa4235006f06b14375cc43) [@mmaietta](https://github.com/mmaietta)_
+
+### Patch Changes
+
+- Fix: `HttpExecutor.removeCrossOriginSensitiveHeaders` copies the headers with `deepAssign`, which ignores `__proto__`, `constructor` and `prototype` keys _[`#10270`](https://github.com/electron-userland/electron-builder/pull/10270) [`ec9135d`](https://github.com/electron-userland/electron-builder/commit/ec9135d0626879479ffa4235006f06b14375cc43) [@mmaietta](https://github.com/mmaietta)_
+
+## 10.0.0-alpha.8
+
+### Minor Changes
+
+- Feat(security): signed update manifests (Ed25519) with trust lists and multi-signature manifests _[`#9877`](https://github.com/electron-userland/electron-builder/pull/9877) [`d45536f`](https://github.com/electron-userland/electron-builder/commit/d45536f74e63e5c19dd4a590238521f6315812f5) [@mmaietta](https://github.com/mmaietta)_
+
+  Optional Ed25519 signing of auto-update manifests (`latest*.yml`). When signing keys are configured
+  (`updateManifest.signingKey`/`signingKeyFile` in config, or `ELECTRON_BUILDER_UPDATE_SIGN_KEY`/`ELECTRON_BUILDER_UPDATE_SIGN_KEY_FILE`
+  env vars), each manifest is signed over its integrity-critical fields and the matching public keys are
+  embedded into `app-update.yml` (both resolved from the same keys on the platform packager, so signing and
+  embedding cannot disagree). electron-updater verifies the signature before downloading and refuses to
+  update on tamper/missing-signature (fail-closed). Opt-in: when no public key is configured, verification is
+  skipped with a one-time warning. New CLI: `electron-builder create-update-key` (prints the public key and its key id).
+
+  Key rotation without a flag day: an install trusts a **list** of public keys (`updateManifestPublicKey` is a
+  string or an array; `updateManifest.publicKey`, `signingKey` and `signingKeyFile` accept arrays, a PEM value may
+  hold several concatenated keys, and `ELECTRON_BUILDER_UPDATE_SIGN_KEY_FILE` accepts several paths joined with
+  the OS path delimiter), and a manifest may carry **several signatures** (`signatures: [{ keyId, signature }]`,
+  one per signing key, next to the legacy `signature` of the first key). A manifest is accepted when any trusted
+  key validates any of its signatures, so a release signed with `[old, new]` verifies on installs that trust
+  either. `AppUpdater.updateManifestPublicKey` accepts a string or an array. A build-time warning flags an
+  explicit `publicKey` list that contains none of the signing keys.
+
+  Gating of the Linux package-manager signature-bypass flags landed separately as
+  `AppUpdater.allowUnverifiedLinuxPackages` (#9990).
+
+### Patch Changes
+
+- Fix: stop oversized in-memory downloads at the configured limit _[`#10123`](https://github.com/electron-userland/electron-builder/pull/10123) [`6ab9a8c`](https://github.com/electron-userland/electron-builder/commit/6ab9a8c5fbed759e0c9e26064208c422c612b200) [@OskarEichler](https://github.com/OskarEichler)_
+
+## 10.0.0-alpha.7
+
+### Patch Changes
+
+- Docs: fix broken electron.build documentation links in readmes, TSDoc comments, and error messages — point auto-update, code-signing, and multi-platform-build references at their new `/docs/features/` locations, repair the `electron.build./` domain typo, and replace anchors that no longer exist (#10107) _[`#10111`](https://github.com/electron-userland/electron-builder/pull/10111) [`cf39086`](https://github.com/electron-userland/electron-builder/commit/cf39086fbb71e34d1fef0359a026697153e6ee3b) [@claude](https://github.com/apps/claude)_
+
 ## 10.0.0-alpha.6
 
 ### Patch Changes
@@ -124,6 +244,7 @@
   Replace hardcoded service-specific hostname checks with sophisticated cross-origin redirect detection that matches industry standards from Python requests library and Apache HttpClient.
 
   **Key improvements:**
+
   - **Case-insensitive hostname comparison** for robust origin detection
   - **HTTP→HTTPS upgrade allowance** on standard ports (80→443) for backward compatibility
   - **Proper default port handling** that treats implicit and explicit default ports as equivalent

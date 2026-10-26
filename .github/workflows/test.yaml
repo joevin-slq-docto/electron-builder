@@ -6,13 +6,6 @@ on:
       - master
       - release/v*
   pull_request:
-  workflow_call:
-    inputs:
-      rebuild-docker-images-call:
-        description: "Force rebuild of Docker images?"
-        required: false
-        type: boolean
-        default: false
   workflow_dispatch:
     inputs:
       rebuild-docker-images:
@@ -43,7 +36,8 @@ env:
 
 jobs:
   check-if-docker-build:
-    runs-on: ubuntu-latest
+    name: Check for Docker image changes
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       force-docker-build: ${{ steps.changes.outputs.docker == 'true' || steps.changes.outputs.workflow == 'true' }}
@@ -69,33 +63,41 @@ jobs:
     if: |
       always() &&
       (needs.check-if-docker-build.outputs.force-docker-build == 'true' ||
-      inputs.rebuild-docker-images == 'true' || inputs.rebuild-docker-images == true ||
-      inputs.rebuild-docker-images-call == 'true' || inputs.rebuild-docker-images-call == true)
-    uses: ./.github/workflows/docker-build.yml
+      inputs.rebuild-docker-images == 'true' || inputs.rebuild-docker-images == true)
+    uses: $/.github/workflows/docker-build.yml
 
   # -------------------------
   # Linting + Shard Planning (unified job outputting map for all platforms)
   # -------------------------
 
   validate-and-shard:
-    runs-on: ubuntu-latest
+    name: Validate and plan shards
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
       linux: ${{ steps.plan.outputs.linux }}
       windows: ${{ steps.plan.outputs.windows }}
       macos: ${{ steps.plan.outputs.macos }}
+      # Exact smart cache snapshot used for the plan; shard jobs restore the same one so their
+      # in-job plan matches the matrix (resolving "latest" per job can pick a different cache).
+      smart-cache-source: ${{ steps.pretest.outputs.smart-cache-source }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
       - name: Setup Tests
-        uses: ./.github/actions/pretest
+        id: pretest
+        uses: $/.github/actions/pretest
         with:
-          cache-key: v-39.8.5-linux-electron
+          cache-key: v-42.4.0-linux-electron
           cache-path: ~/.cache/electron
           reset-vitest-smart-cache: ${{ inputs.reset-vitest-smart-cache }}
           collect-coverage: ${{ inputs.collect-coverage }}
+
+      # Before ci:validate, which rewrites files via `pnpm format` (generate:all)
+      - name: Check formatting
+        run: pnpm format:check
 
       - name: Validate files
         run: pnpm ci:validate
@@ -117,9 +119,9 @@ jobs:
           MACOS_SHARDS=$(echo "$SHARD_JSON" | jq -c '.darwin')
 
           # Set outputs
-          echo "linux=$LINUX_SHARDS" >> $GITHUB_OUTPUT
-          echo "windows=$WINDOWS_SHARDS" >> $GITHUB_OUTPUT
-          echo "macos=$MACOS_SHARDS" >> $GITHUB_OUTPUT
+          echo "linux=$LINUX_SHARDS" >> "$GITHUB_OUTPUT"
+          echo "windows=$WINDOWS_SHARDS" >> "$GITHUB_OUTPUT"
+          echo "macos=$MACOS_SHARDS" >> "$GITHUB_OUTPUT"
 
           # Debug output
           echo "Planned shards:"
@@ -144,9 +146,9 @@ jobs:
         shard: ${{ fromJson(needs.validate-and-shard.outputs.linux) }}
         include:
           - platform: linux
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             cache-path: ~/.cache/electron
-            cache-key: v-39.8.5-linux-electron
+            cache-key: v-42.4.0-linux-electron
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -156,15 +158,16 @@ jobs:
           persist-credentials: false
 
       - name: Cleanup runner
-        uses: ./.github/actions/cleanup-runner
+        uses: $/.github/actions/cleanup-runner
 
       - name: Setup Tests
-        uses: ./.github/actions/pretest
+        uses: $/.github/actions/pretest
         with:
           cache-path: ${{ matrix.cache-path }}
           cache-key: ${{ matrix.cache-key }}
           reset-vitest-smart-cache: ${{ inputs.reset-vitest-smart-cache }}
           collect-coverage: ${{ inputs.collect-coverage }}
+          smart-cache-source: ${{ needs.validate-and-shard.outputs.smart-cache-source }}
 
       - name: Download test-runner if exists
         if: needs.run-docker-build.result == 'success'
@@ -176,27 +179,27 @@ jobs:
       - name: Load test runner image if needed
         if: needs.run-docker-build.result == 'success'
         run: |
-          docker image load --input ${{ runner.temp }}/electron-builder-all-${{ env.TEST_IMAGE_NODE_MAJOR_VERSION }}.tar
+          docker image load --input "$RUNNER_TEMP/electron-builder-all-$TEST_IMAGE_NODE_MAJOR_VERSION.tar"
           docker image ls -a
 
       - name: Write Docker secrets env file
         run: |
-          printf 'CSC_KEY_PASSWORD=%s\n' "$CSC_KEY_PASSWORD_SECRET" > "${{ runner.temp }}/docker-secrets.env"
-          chmod 600 "${{ runner.temp }}/docker-secrets.env"
+          printf 'CSC_KEY_PASSWORD=%s\n' "$CSC_KEY_PASSWORD_SECRET" > "$RUNNER_TEMP/docker-secrets.env"
+          chmod 600 "$RUNNER_TEMP/docker-secrets.env"
         env:
           CSC_KEY_PASSWORD_SECRET: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
 
       - name: Run shard in docker
         run: |
-          echo $TEST_RUNNER_IMAGE_TAG
+          echo "$TEST_RUNNER_IMAGE_TAG"
           pnpm test:linux
         env:
-          ADDITIONAL_DOCKER_ARGS: "--env-file ${{ runner.temp }}/docker-secrets.env -e VITEST_SHARD_INDEX=${{ matrix.shard }} -e VITEST_SMART_CACHE_FILE=./test/vitest-scripts/vitest-config/_vitest-smart-cache.json -e RESET_VITEST_SHARD_CACHE=${{ inputs.reset-vitest-smart-cache }} -e VITEST_COVERAGE=${{ inputs.collect-coverage }}"
+          ADDITIONAL_DOCKER_ARGS: "--env-file ${{ runner.temp }}/docker-secrets.env -e VITEST_SHARD_INDEX=${{ matrix.shard }} -e VITEST_EXPECTED_SHARD_COUNT=${{ strategy.job-total }} -e VITEST_SMART_CACHE_SOURCE=${{ needs.validate-and-shard.outputs.smart-cache-source }} -e VITEST_SMART_CACHE_FILE=./test/vitest-scripts/vitest-config/_vitest-smart-cache.json -e RESET_VITEST_SHARD_CACHE=${{ inputs.reset-vitest-smart-cache }} -e VITEST_COVERAGE=${{ inputs.collect-coverage }}"
           TEST_RUNNER_IMAGE_TAG: electronuserland/builder:${{ env.TEST_IMAGE_NODE_MAJOR_VERSION }}-wine-mono
 
       - name: Upload test artifacts
         if: always()
-        uses: ./.github/actions/upload-test-artifacts
+        uses: $/.github/actions/upload-test-artifacts
         with:
           name: ${{ matrix.platform }}-${{ matrix.shard }}
 
@@ -211,7 +214,7 @@ jobs:
           - platform: windows
             runner: windows-latest
             cache-path: ~\AppData\Local\electron\Cache
-            cache-key: v-39.8.5-windows-electron
+            cache-key: v-42.4.0-windows-electron
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -220,12 +223,13 @@ jobs:
           persist-credentials: false
 
       - name: Setup Tests
-        uses: ./.github/actions/pretest
+        uses: $/.github/actions/pretest
         with:
           cache-key: ${{ matrix.cache-key }}
           cache-path: ${{ matrix.cache-path }}
           reset-vitest-smart-cache: ${{ inputs.reset-vitest-smart-cache }}
           collect-coverage: ${{ inputs.collect-coverage }}
+          smart-cache-source: ${{ needs.validate-and-shard.outputs.smart-cache-source }}
 
       - name: Pre-initialize NuGet IsolatedStorage
         shell: pwsh
@@ -241,11 +245,13 @@ jobs:
         env:
           CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
           VITEST_SHARD_INDEX: ${{ matrix.shard }}
+          VITEST_EXPECTED_SHARD_COUNT: ${{ strategy.job-total }}
+          VITEST_SMART_CACHE_SOURCE: ${{ needs.validate-and-shard.outputs.smart-cache-source }}
           VITEST_SMART_CACHE_FILE: ${{ github.workspace }}\test\vitest-scripts\vitest-config\_vitest-smart-cache.json
 
       - name: Upload test artifacts
         if: always()
-        uses: ./.github/actions/upload-test-artifacts
+        uses: $/.github/actions/upload-test-artifacts
         with:
           name: ${{ matrix.platform }}-${{ matrix.shard }}
 
@@ -260,7 +266,7 @@ jobs:
           - platform: macos
             runner: macos-26
             cache-path: ~/Library/Caches/electron
-            cache-key: v-39.8.5-macos-electron
+            cache-key: v-42.4.0-macos-electron
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -269,12 +275,13 @@ jobs:
           persist-credentials: false
 
       - name: Setup Tests
-        uses: ./.github/actions/pretest
+        uses: $/.github/actions/pretest
         with:
           cache-path: ${{ matrix.cache-path }}
           cache-key: ${{ matrix.cache-key }}
           reset-vitest-smart-cache: ${{ inputs.reset-vitest-smart-cache }}
           collect-coverage: ${{ inputs.collect-coverage }}
+          smart-cache-source: ${{ needs.validate-and-shard.outputs.smart-cache-source }}
 
       - name: Silence the damn GH runner warnings (temporary until GH updates their runners to a newer macOS base toolset bundle)
         run: |
@@ -286,15 +293,41 @@ jobs:
           brew install rpm
           brew install snapcraft
 
+      # The published win-codesign darwin bundles (1.0.0 through 1.3.0) link osslsigncode dynamically against
+      # $(brew --prefix)/opt/openssl@3/lib/libcrypto.3.dylib and were built against OpenSSL 3.6 (they import
+      # _OPENSSL_sk_set_thunks, which first shipped in 3.6). Homebrew's `openssl@3` formula now tracks the 3.5 LTS line
+      # (runner image macos-26-arm64 20261021.0445 ships 3.5.9), so dyld aborts with "Symbol not found". Point the
+      # openssl@3 opt link at the keg-only `openssl@3.6` formula; 3.6 stays ABI-compatible with anything built
+      # against 3.5. Must run after every other `brew install` so nothing relinks openssl@3 afterwards.
+      # Remove once the darwin bundles link OpenSSL statically and the older toolset versions are no longer tested here.
+      - name: Provide OpenSSL 3.6 for bundled osslsigncode
+        run: |
+          OPT="$(brew --prefix)/opt/openssl@3"
+          has_symbol() { nm -gU "$1/lib/libcrypto.3.dylib" 2>/dev/null | grep '_OPENSSL_sk_set_thunks$' >/dev/null; }
+          if has_symbol "$OPT"; then
+            # Older images still ship openssl@3 3.6.x, where `openssl@3.6` resolves to openssl@3 itself.
+            echo "openssl@3 at $OPT already provides OpenSSL 3.6+"
+          else
+            brew install openssl@3.6
+            # Resolve to the real Cellar keg so the opt link can never point back at itself.
+            KEG="$(cd "$(brew --prefix openssl@3.6)" && pwd -P)"
+            has_symbol "$KEG" || { echo "::error::openssl@3.6 keg $KEG does not export _OPENSSL_sk_set_thunks"; exit 1; }
+            ln -sfn "$KEG" "$OPT"
+          fi
+          "$OPT/bin/openssl" version
+          has_symbol "$OPT" || { echo "::error::libcrypto at $OPT does not export _OPENSSL_sk_set_thunks"; exit 1; }
+
       - name: Run shard
         run: pnpm ci:test
         env:
           VITEST_SHARD_INDEX: ${{ matrix.shard }}
+          VITEST_EXPECTED_SHARD_COUNT: ${{ strategy.job-total }}
+          VITEST_SMART_CACHE_SOURCE: ${{ needs.validate-and-shard.outputs.smart-cache-source }}
           VITEST_SMART_CACHE_FILE: ${{ github.workspace }}/test/vitest-scripts/vitest-config/_vitest-smart-cache.json
 
       - name: Upload test artifacts
         if: always()
-        uses: ./.github/actions/upload-test-artifacts
+        uses: $/.github/actions/upload-test-artifacts
         with:
           name: ${{ matrix.platform }}-${{ matrix.shard }}
 
@@ -310,7 +343,7 @@ jobs:
       always() &&
       needs.check-if-docker-build.result == 'success' &&
       (needs.run-docker-build.result == 'success' || needs.run-docker-build.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -318,13 +351,13 @@ jobs:
           persist-credentials: false
 
       - name: Cleanup runner
-        uses: ./.github/actions/cleanup-runner
+        uses: $/.github/actions/cleanup-runner
 
       - name: Setup Tests
-        uses: ./.github/actions/pretest
+        uses: $/.github/actions/pretest
         with:
           cache-path: ~/.cache/electron
-          cache-key: v-39.8.5-update-electron
+          cache-key: v-42.4.0-update-electron
           reset-vitest-smart-cache: ${{ inputs.reset-vitest-smart-cache }}
           collect-coverage: ${{ inputs.collect-coverage }}
 
@@ -344,20 +377,16 @@ jobs:
       - name: Load test runner image if needed
         if: needs.run-docker-build.result == 'success'
         run: |
-          docker image load --input ${{ runner.temp }}/electron-builder-all-${{ env.TEST_IMAGE_NODE_MAJOR_VERSION }}.tar
+          docker image load --input "$RUNNER_TEMP/electron-builder-all-$TEST_IMAGE_NODE_MAJOR_VERSION.tar"
           docker image ls -a
 
-      - name: Write Docker secrets env file
+      # The updater tests no longer hit live provider endpoints, so no provider tokens are injected.
+      # The file must always exist (even empty) because docker --env-file fails on a missing file
+      # and the R2 append step below is skipped on forks.
+      - name: Create Docker secrets env file
         run: |
-          printf 'KEYGEN_TOKEN=%s\nBITBUCKET_TOKEN=%s\nGH_TOKEN=%s\nGITLAB_TOKEN=%s\n' \
-            "$KEYGEN_TOKEN_SECRET" "$BITBUCKET_TOKEN_SECRET" "$GH_TOKEN_SECRET" "$GITLAB_TOKEN_SECRET" \
-            > "${{ runner.temp }}/docker-secrets.env"
-          chmod 600 "${{ runner.temp }}/docker-secrets.env"
-        env:
-          KEYGEN_TOKEN_SECRET: ${{ secrets.KEYGEN_TOKEN }}
-          BITBUCKET_TOKEN_SECRET: ${{ secrets.BITBUCKET_TOKEN }}
-          GH_TOKEN_SECRET: ${{ secrets.GH_TOKEN }}
-          GITLAB_TOKEN_SECRET: ${{ secrets.GITLAB_TOKEN }}
+          : > "$RUNNER_TEMP/docker-secrets.env"
+          chmod 600 "$RUNNER_TEMP/docker-secrets.env"
 
       # Gated on the upstream repository so forks cannot substitute their own R2 credentials;
       # without these vars the R2 live smoke test is skipped (test.ifEnv).
@@ -366,7 +395,7 @@ jobs:
         run: |
           printf 'CF_R2_ACCESS_KEY_ID=%s\nCF_R2_SECRET_ACCESS_KEY=%s\nCF_R2_ACCOUNT_ID=%s\nCF_R2_BUCKET=%s\nCF_R2_PUBLIC_URL=%s\n' \
             "$CF_R2_ACCESS_KEY_ID_SECRET" "$CF_R2_SECRET_ACCESS_KEY_SECRET" "$CF_R2_ACCOUNT_ID_SECRET" "$CF_R2_BUCKET_SECRET" "$CF_R2_PUBLIC_URL_SECRET" \
-            >> "${{ runner.temp }}/docker-secrets.env"
+            >> "$RUNNER_TEMP/docker-secrets.env"
         env:
           CF_R2_ACCESS_KEY_ID_SECRET: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
           CF_R2_SECRET_ACCESS_KEY_SECRET: ${{ secrets.CF_R2_SECRET_ACCESS_KEY }}
@@ -376,16 +405,16 @@ jobs:
 
       - name: Test
         run: |
-          echo $TEST_RUNNER_IMAGE_TAG
+          echo "$TEST_RUNNER_IMAGE_TAG"
           pnpm test:linux
         env:
-          TEST_FILES: nsisUpdaterTest,PublishManagerTest,differentialUpdateTest,GitlabPublisherTest,GitlabPublisher.integration.test,R2PublisherTest
+          TEST_FILES: nsisUpdaterTest,PublishManager,differentialUpdateTest,GitlabPublisherTest,R2PublisherTest
           TEST_RUNNER_IMAGE_TAG: electronuserland/builder:${{ env.TEST_IMAGE_NODE_MAJOR_VERSION }}-wine-mono
           ADDITIONAL_DOCKER_ARGS: "--env-file ${{ runner.temp }}/docker-secrets.env -e VITEST_SMART_CACHE_FILE=./test/vitest-scripts/vitest-config/_vitest-smart-cache.json -e RESET_VITEST_SHARD_CACHE=${{ inputs.reset-vitest-smart-cache }} -e VITEST_COVERAGE=${{ inputs.collect-coverage }}"
 
       - name: Upload test artifacts
         if: always()
-        uses: ./.github/actions/upload-test-artifacts
+        uses: $/.github/actions/upload-test-artifacts
         with:
           name: updater
 
@@ -403,16 +432,17 @@ jobs:
           persist-credentials: false
 
       - name: Setup Tests
-        uses: ./.github/actions/pretest
+        uses: $/.github/actions/pretest
         with:
           cache-path: ~/.cache/electron
-          cache-key: v-39.8.5-native-electron
+          cache-key: v-42.4.0-native-electron
           reset-vitest-smart-cache: ${{ inputs.reset-vitest-smart-cache }}
           collect-coverage: ${{ inputs.collect-coverage }}
 
       - name: Test snap ${{ matrix.core }} (Docker)
-        run: SNAP_CORE=${{ matrix.core }} ./test/src/linux/test-snap.sh
+        run: ./test/src/linux/test-snap.sh
         env:
+          SNAP_CORE: ${{ matrix.core }}
           VITEST_SMART_CACHE_FILE: ${{ github.workspace }}/test/vitest-scripts/vitest-config/_vitest-smart-cache.json
           RESET_VITEST_SHARD_CACHE: ${{ inputs.reset-vitest-smart-cache }}
 
@@ -441,7 +471,7 @@ jobs:
         if: matrix.core == 'core24'
         run: pnpm ci:test
         env:
-          TEST_FILES: snapHeavyTest
+          TEST_FILES: snapHeavy
           SNAP_TEST_CORES: core24
           SNAPCRAFT_BUILD_ENVIRONMENT: host
           RUN_SNAP_TESTS: "true"
@@ -450,40 +480,195 @@ jobs:
 
       - name: Upload test artifacts
         if: always()
-        uses: ./.github/actions/upload-test-artifacts
+        uses: $/.github/actions/upload-test-artifacts
         with:
           name: snap-${{ matrix.core }}
 
+  # The flatpak suite (test/src/linux/flatpak.e2e.ts) is gated on `flatpak` being on PATH and on bubblewrap
+  # being able to create namespaces (canRunFlatpak in test/src/updater/blackboxInstallLinux.ts), so it skips inside the docker shards,
+  # whose image includes flatpak but which run unprivileged, and on every other runner. It needs FUSE
+  # (flatpak-builder's rofiles-fuse) and user namespaces (the bubblewrap sandbox of flatpak build-export's
+  # icon validator), so this job runs it where both work.
+  # The flatpak case of the blackbox install suite (test/src/updater/blackboxInstallTest.ts) runs here too: it
+  # installs the bundle and starts the app with `flatpak run`, which needs bubblewrap again, plus an X display.
+  # The flatpak target installs missing refs with `flatpak install --user` (no explicit remote), so
+  # the runtimes are pre-installed into the same user installation from a user-level flathub remote.
+  # It runs in a privileged container of the electronuserland/builder image built from docker/ (flatpak and flatpak-builder from
+  # the Flatpak team's PPA, plus Xvfb in the -wine-chrome variant), so nothing is installed with apt on the runner, whose
+  # package mirror at times serves the ~100 MB of flatpak, flatpak-builder and their dependencies at ~50 kB/s. The flatpak user
+  # installation is a directory on the runner, mounted into the container.
+  test-flatpak:
+    name: Test Flatpak
+    needs: [check-if-docker-build, run-docker-build]
+    if: |
+      always() &&
+      needs.check-if-docker-build.result == 'success' &&
+      (needs.run-docker-build.result == 'success' || needs.run-docker-build.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      # Every ref the suite needs, pre-installed so the flatpak target's own `flatpak install` inside a test does not eat the
+      # test timeout. 26.08 is the FlatpakTarget default runtime/base version; 25.08 is what the "custom runtime and base app
+      # version" test asks for. Both are supported on flathub.
+      FLATPAK_REFS: >-
+        org.freedesktop.Platform//26.08
+        org.freedesktop.Sdk//26.08
+        org.electronjs.Electron2.BaseApp//26.08
+        org.freedesktop.Platform//25.08
+        org.freedesktop.Sdk//25.08
+        org.electronjs.Electron2.BaseApp//25.08
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # The image and the flatpak user installation take several GB each
+      - name: Cleanup runner
+        uses: $/.github/actions/cleanup-runner
+
+      - name: Setup Tests
+        uses: $/.github/actions/pretest
+        with:
+          cache-path: ~/.cache/electron
+          cache-key: v-42.4.0-native-electron
+          reset-vitest-smart-cache: ${{ inputs.reset-vitest-smart-cache }}
+          collect-coverage: ${{ inputs.collect-coverage }}
+
+      - name: Download test-runner if exists
+        if: needs.run-docker-build.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: electron-builder-all-${{ env.TEST_IMAGE_NODE_MAJOR_VERSION }}
+          path: ${{ runner.temp }}
+
+      - name: Load test runner image if needed
+        if: needs.run-docker-build.result == 'success'
+        run: |
+          docker image load --input "$RUNNER_TEMP/electron-builder-all-$TEST_IMAGE_NODE_MAJOR_VERSION.tar"
+          docker image ls -a
+
+      # The tests run in the container as the runner's user, whose bubblewrap needs the unprivileged user namespaces that
+      # Ubuntu 24.04 restricts via AppArmor: lift that on the host. See test/src/linux/flatpak-docker.sh.
+      - name: Prepare flatpak test image
+        run: |
+          IMAGE="electronuserland/builder:${TEST_IMAGE_NODE_MAJOR_VERSION}-wine-chrome"
+          echo "FLATPAK_TEST_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          if ! docker image inspect "$IMAGE" > /dev/null 2>&1; then
+            for i in 1 2 3; do
+              docker pull "$IMAGE" && break
+              if [ "$i" -eq 3 ]; then exit 1; fi
+              echo "docker pull failed (attempt $i/3), retrying in 30s…" >&2
+              sleep 30
+            done
+          fi
+          docker run --rm "$IMAGE" sh -c 'flatpak --version && flatpak-builder --version'
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # Into the runner user's flatpak user installation (~/.local/share/flatpak), which test/src/linux/flatpak-docker.sh mounts
+      # into the container, in the container as that user: as root, flatpak refuses to install into a user installation that
+      # another user owns. The image adds the flathub remote for root only, hence the remote-add. The refs are not cached: they
+      # are several GB, and an entry that size was evicted from the repository's 10 GB cache before later runs could restore it.
+      # `flatpak update` is a no-op after a fresh install; it keeps the refs current should the directory ever be restored.
+      - name: Install flatpak runtimes
+        run: |
+          test/src/linux/flatpak-docker.sh sh -c '
+            flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo &&
+            flatpak install --user -y --noninteractive flathub "$@" &&
+            flatpak update --user -y --noninteractive "$@" &&
+            flatpak list --user --columns=ref,size' sh $FLATPAK_REFS
+
+      # The suite fails fast here if bubblewrap cannot create namespaces, rather than skipping itself
+      - name: Test flatpak
+        run: test/src/linux/flatpak-docker.sh sh -c 'bwrap --ro-bind / / true && pnpm ci:test'
+        env:
+          TEST_FILES: flatpak,blackboxInstallTest
+          VITEST_SMART_CACHE_FILE: ./test/vitest-scripts/vitest-config/_vitest-smart-cache.json
+          RESET_VITEST_SHARD_CACHE: ${{ inputs.reset-vitest-smart-cache }}
+
+      - name: Upload test artifacts
+        if: always()
+        uses: $/.github/actions/upload-test-artifacts
+        with:
+          name: flatpak
+
   test-e2e:
-    name: Test e2e Auto Updater Linux
-    runs-on: ubuntu-latest
+    name: Test e2e Auto Updater Linux (${{ matrix.test_config.id }})
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        # One job per entry. Without test_files a job runs every Linux e2e suite (the default TEST_FILES in
+        # test/src/updater/test-specific-platforms.sh). Every package manager runs every update case, but the rpm
+        # cases are too long for one job (4-7 min each, almost all of it rpm builds), so each rpm package manager is
+        # split into an "update" and a "signing" job. blackboxInstallTest installs with a fixed command per distro and
+        # ignores PACKAGE_MANAGER_TO_TEST, so it runs once per image (rpm-install, debian-apt, archlinux-pacman,
+        # appimage-install) instead of in every package-manager job.
         test_config:
-          - stem: archlinux
+          - id: archlinux-pacman
+            stem: archlinux
             env:
               PACKAGE_MANAGER_TO_TEST: pacman
-          - stem: rpm
-            env:
-              PACKAGE_MANAGER_TO_TEST: dnf
-          - stem: rpm
-            env:
-              PACKAGE_MANAGER_TO_TEST: zypper
-          - stem: rpm
-            env:
-              PACKAGE_MANAGER_TO_TEST: yum
-          - stem: rpm
-            env:
-              PACKAGE_MANAGER_TO_TEST: rpm
-          - stem: debian
+          - id: debian-apt
+            stem: debian
             env:
               PACKAGE_MANAGER_TO_TEST: apt
-          - stem: debian
+          - id: debian-dpkg
+            stem: debian
+            test_files: blackboxUpdateTest,linuxUpdaterTest,blackboxUpdateLinuxNextLaunch,blackboxUpdateLinuxSignedManifest,blackboxUpdateLinuxKeyRotation
             env:
               PACKAGE_MANAGER_TO_TEST: dpkg
-          - stem: appimage
+          - id: rpm-zypper-update
+            stem: rpm
+            test_files: blackboxUpdateTest,linuxUpdaterTest,blackboxUpdateLinuxNextLaunch
+            env:
+              PACKAGE_MANAGER_TO_TEST: zypper
+          - id: rpm-zypper-signing
+            stem: rpm
+            test_files: blackboxUpdateLinuxSignedManifest,blackboxUpdateLinuxKeyRotation
+            env:
+              PACKAGE_MANAGER_TO_TEST: zypper
+          - id: rpm-dnf-update
+            stem: rpm
+            test_files: blackboxUpdateTest,linuxUpdaterTest,blackboxUpdateLinuxNextLaunch
+            env:
+              PACKAGE_MANAGER_TO_TEST: dnf
+          - id: rpm-dnf-signing
+            stem: rpm
+            test_files: blackboxUpdateLinuxSignedManifest,blackboxUpdateLinuxKeyRotation
+            env:
+              PACKAGE_MANAGER_TO_TEST: dnf
+          - id: rpm-yum-update
+            stem: rpm
+            test_files: blackboxUpdateTest,linuxUpdaterTest,blackboxUpdateLinuxNextLaunch
+            env:
+              PACKAGE_MANAGER_TO_TEST: yum
+          - id: rpm-yum-signing
+            stem: rpm
+            test_files: blackboxUpdateLinuxSignedManifest,blackboxUpdateLinuxKeyRotation
+            env:
+              PACKAGE_MANAGER_TO_TEST: yum
+          - id: rpm-rpm-update
+            stem: rpm
+            test_files: blackboxUpdateTest,linuxUpdaterTest,blackboxUpdateLinuxNextLaunch
+            env:
+              PACKAGE_MANAGER_TO_TEST: rpm
+          - id: rpm-rpm-signing
+            stem: rpm
+            test_files: blackboxUpdateLinuxSignedManifest,blackboxUpdateLinuxKeyRotation
+            env:
+              PACKAGE_MANAGER_TO_TEST: rpm
+          - id: rpm-install
+            stem: rpm
+            test_files: blackboxInstallTest
+          - id: appimage-install
+            stem: appimage
+            test_files: blackboxInstallTest
+            env:
+              RUN_APP_IMAGE_TEST: true
+          - id: appimage-update
+            stem: appimage
+            test_files: blackboxLinux__appimage
             env:
               RUN_APP_IMAGE_TEST: true
     steps:
@@ -493,19 +678,24 @@ jobs:
           persist-credentials: false
 
       - name: Setup Tests
-        uses: ./.github/actions/pretest
+        uses: $/.github/actions/pretest
         with:
           cache-path: ~/.cache/electron
-          cache-key: v-39.8.5-linux-e2e-electron
+          cache-key: v-42.4.0-linux-e2e-electron
           reset-vitest-smart-cache: ${{ inputs.reset-vitest-smart-cache }}
           collect-coverage: ${{ inputs.collect-coverage }}
 
       - name: docker build
-        run: ./test/src/updater/test-specific-platforms.sh ${{ matrix.test_config.stem }} build
+        run: ./test/src/updater/test-specific-platforms.sh "$TEST_STEM" build
+        env:
+          TEST_STEM: ${{ matrix.test_config.stem }}
 
       - name: e2e Linux Updater tests (install, auto-update, uninstall)
-        run: ./test/src/updater/test-specific-platforms.sh ${{ matrix.test_config.stem }} run
+        run: ./test/src/updater/test-specific-platforms.sh "$TEST_STEM" run
         env:
+          TEST_STEM: ${{ matrix.test_config.stem }}
+          # empty → the script's default (every Linux e2e suite)
+          TEST_FILES: ${{ matrix.test_config.test_files || '' }}
           ADDITIONAL_DOCKER_ARGS: >-
             -e PACKAGE_MANAGER_TO_TEST=${{ matrix.test_config.env.PACKAGE_MANAGER_TO_TEST || '' }}
             -e RUN_APP_IMAGE_TEST=${{ matrix.test_config.env.RUN_APP_IMAGE_TEST || false }}
@@ -514,25 +704,26 @@ jobs:
 
       - name: Upload test artifacts
         if: always()
-        uses: ./.github/actions/upload-test-artifacts
+        uses: $/.github/actions/upload-test-artifacts
         with:
-          name: e2e-${{ matrix.test_config.env.PACKAGE_MANAGER_TO_TEST || matrix.test_config.stem }}
+          name: e2e-${{ matrix.test_config.id }}
 
   # -------------------------
   # Merge Smart Cache Artifacts
   # -------------------------
 
   merge-smart-cache:
-    needs: [test-linux, test-windows, test-macos, test-e2e, test-updater, test-snap]
+    name: Merge smart cache and test reports
+    needs: [test-linux, test-windows, test-macos, test-e2e, test-updater, test-snap, test-flatpak]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
-      - uses: ./.github/actions/pnpm
+      - uses: $/.github/actions/pnpm
 
       - name: Download all smart cache artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -612,8 +803,9 @@ jobs:
 
       - name: Compute Vitest smart cache ref
         if: always()
+        env:
+          PR_NUM: ${{ github.event.pull_request.number }}
         run: |
-          PR_NUM="${{ github.event.pull_request.number }}"
           if [ -n "$PR_NUM" ]; then
             echo "VITEST_CACHE_REF=PR-${PR_NUM}" >> "$GITHUB_ENV"
           else

@@ -10,10 +10,13 @@ import { resolveToolsetVersion } from "../../toolsets/version.js"
 import { VmManager } from "../../vm/vm.js"
 import { WineVmManager } from "../../vm/WineVm.js"
 import { WinPackager } from "../../winPackager.js"
+import { validatePublisherNameFormat } from "./publisherName.js"
 import { SignManager } from "./signManager.js"
 import { WindowsSignOptions } from "./windowsCodeSign.js"
+import { SignFileResult } from "../signResult.js"
 import { CertificateFromStoreInfo, FileCodeSigningInfo } from "./windowsSignToolManager.js"
 import semver from "semver"
+import { BUILD_CHANGES_URL } from "../../util/config/legacyOptions.js"
 
 const minimumWinCodeSignVersionForDlib = "1.3.0"
 export class WindowsSignAzureManager implements SignManager {
@@ -23,14 +26,16 @@ export class WindowsSignAzureManager implements SignManager {
   private readonly vm: VmManager = process.platform === "win32" ? new VmManager() : new WineVmManager(this.packager.config.toolsets?.wine, this.packager.buildResourcesDir)
 
   readonly computedPublisherName = new Lazy<Array<string> | null>(() => {
-    return Promise.resolve(asArray(this.publisherName))
+    return Promise.resolve(asArray(this.resolvePublisherName()))
   })
 
-  private get publisherName(): string {
+  // Throws synchronously for a missing publisherName, or one that is not a distinguished name (electron-updater 7 never matches one).
+  private resolvePublisherName(): string {
     const result = this.signing.publisherName
     if (isEmptyOrSpaces(result)) {
       throw new Error("Azure Trusted Signing requires 'publisherName' in win.sign config (no local certificate to derive it from)")
     }
+    validatePublisherNameFormat(result)
     return result
   }
 
@@ -62,8 +67,10 @@ export class WindowsSignAzureManager implements SignManager {
     const wcs = this.packager.config.toolsets?.winCodeSign
     log.info(
       {
+        // oxlint-disable-next-line typescript/no-base-to-string -- pre-existing log text; a custom toolset object prints as "[object Object]", changing it is out of scope for the lint migration
         reason: `toolsets.winCodeSign "${String(wcs)}" is below the minimum "${minimumWinCodeSignVersionForDlib}"`,
         guidance: `leave toolsets.winCodeSign unset (or set it to "${minimumWinCodeSignVersionForDlib}" / "latest") to use the faster signtool /dlib integration`,
+        docs: `${BUILD_CHANGES_URL}#azure-trusted-signing-signtool-dlib-is-the-default`,
       },
       `Azure Trusted Signing: falling back to legacy PowerShell (Invoke-TrustedSigning)`
     )
@@ -80,7 +87,7 @@ export class WindowsSignAzureManager implements SignManager {
   }
 
   computePublisherName(_target: Target, publisherName: string | null): Promise<string> {
-    return Promise.resolve(this.publisherName ?? publisherName)
+    return Promise.resolve(this.resolvePublisherName() ?? publisherName)
   }
 
   readonly cscInfo = new MemoLazy<WindowsConfiguration, FileCodeSigningInfo | CertificateFromStoreInfo | null>(
@@ -88,11 +95,13 @@ export class WindowsSignAzureManager implements SignManager {
     _selected => Promise.resolve(null)
   )
 
-  async signFile(options: WindowsSignOptions): Promise<boolean> {
+  async signFile(options: WindowsSignOptions): Promise<SignFileResult> {
+    // validate publisherName before the first file is signed, like the signtool-family managers do, even when no publish config exists
+    this.resolvePublisherName()
     return this.isLegacyMode() ? this.signFileLegacy(options) : this.signFileWithDlib(options)
   }
 
-  private async signFileLegacy(options: WindowsSignOptions): Promise<boolean> {
+  private async signFileLegacy(options: WindowsSignOptions): Promise<SignFileResult> {
     const { signing } = this
     const vm = await this.packager.vm.value
     const ps = await vm.powershellCommand.value
@@ -130,11 +139,11 @@ export class WindowsSignAzureManager implements SignManager {
     // PowerShell still parses the decoded string, so PS-level single-quote escaping above is retained.
     const psCommand = `Invoke-TrustedSigning ${paramsString}`
     const encodedCommand = Buffer.from(psCommand, "utf16le").toString("base64")
-    await vm.exec(ps, ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodedCommand])
-    return true
+    await vm.exec(ps, ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodedCommand], { env: azureCredentialEnv() })
+    return "signed"
   }
 
-  private async signFileWithDlib(options: WindowsSignOptions): Promise<boolean> {
+  private async signFileWithDlib(options: WindowsSignOptions): Promise<SignFileResult> {
     const { signing } = this
     const winCodeSign = this.packager.config.toolsets?.winCodeSign
     const isCustom = typeof winCodeSign === "object" && winCodeSign != null
@@ -203,8 +212,20 @@ export class WindowsSignAzureManager implements SignManager {
     // DOTNET_ROOT: Ijwhost.dll (shipped in the ats-bundle) reads this env var to locate
     // hostfxr.dll. On Wine, toVmFile converts the host path to a Z:\ path that Wine resolves
     // back to the same location on the host filesystem.
-    const execOptions = dotnetRootPath != null ? { env: { DOTNET_ROOT: this.vm.toVmFile(dotnetRootPath) } } : undefined
-    await this.vm.exec(signtoolPath, args, execOptions)
-    return true
+    const env = dotnetRootPath != null ? { ...azureCredentialEnv(), DOTNET_ROOT: this.vm.toVmFile(dotnetRootPath) } : azureCredentialEnv()
+    await this.vm.exec(signtoolPath, args, { env })
+    return "signed"
   }
+}
+
+// The Azure.Identity credential (EnvironmentCredential and the others of DefaultAzureCredential) reads its settings and secrets from
+// AZURE_* variables, which a child process without an explicit environment does not get: builder-util removes credentials from it
+function azureCredentialEnv(): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value != null && name.toUpperCase().startsWith("AZURE_")) {
+      env[name] = value
+    }
+  }
+  return env
 }

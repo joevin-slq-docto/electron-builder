@@ -24,6 +24,7 @@ export { Arch, archFromString, ArchType, defaultArchFromString, getArchCliNames,
 export { AsyncTaskManager } from "./asyncTaskManager.js"
 export { DebugLogger } from "./DebugLogger.js"
 export * from "./envUtil.js"
+export { Executables, ExecutableLocation, ExecutableName, ExecutablesConfig } from "./executables.js"
 export { parseValidEnvVarUrl } from "./envUtil.js"
 export * from "./log.js"
 export { buildGotProxyAgent, httpExecutor, NodeHttpExecutor } from "./nodeHttpExecutor.js"
@@ -32,9 +33,20 @@ export { escapeForXml, isEmptyOrSpaces } from "./stringUtil.js"
 
 export { asArray, deepAssign, isValidKey } from "builder-util-runtime"
 export * from "./fs.js"
+export * from "./pathContainment.js"
 
-export { decodeCscLinkBase64, loadCscLink, resolveCscLinkPath } from "./cscLink.js"
 export { generateKsuid } from "./ksuid.js"
+export { loadCscLink, decodeCscLinkBase64, decodeStrictBase64, resolveCscLinkPath } from "./cscLink.js"
+export {
+  signUpdateManifest,
+  createUpdateManifestSignatures,
+  parsePrivateKey,
+  derivePublicKeyPem,
+  loadUpdateSigningKey,
+  loadUpdateSigningKeys,
+  UpdateSigningKeySources,
+  generateUpdateSigningKeypair,
+} from "./updateManifestSigner.js"
 
 export const debug7z = _debug("electron-builder:7z")
 
@@ -135,14 +147,15 @@ export function filterSensitiveEnv(env: Record<string, string | undefined>): Rec
 }
 
 function getProcessEnv(env: Record<string, string | undefined> | Nullish): NodeJS.ProcessEnv | undefined {
-  // Windows: passing a filtered env to execFile drops critical system vars (PATH, SYSTEMROOT, TEMP)
-  // that many tools require. Credential stripping is therefore not applied on Windows.
+  // When no explicit env is provided, strip credential env vars so child processes
+  // (package managers, signing tools, etc.) don't inherit secrets they don't need. A caller that
+  // starts a tool which needs a credential passes the environment explicitly.
   if (process.platform === "win32") {
-    return env == null ? undefined : env
+    // Only credentials are removed: the system variables that Windows tools need (PATH, SystemRoot, TEMP, …) are kept.
+    // The locale variables below are a POSIX convention and are not set on Windows.
+    return env == null ? stripSensitiveEnvVars(process.env) : env
   }
 
-  // When no explicit env is provided, strip credential env vars so child processes
-  // (package managers, signing tools, etc.) don't inherit secrets they don't need.
   const finalEnv = {
     ...(env == null ? stripSensitiveEnvVars(process.env) : env),
   }
@@ -194,13 +207,14 @@ export function exec(file: string, args?: Array<string> | null, options?: ExecFi
 
   const attempt = () =>
     new Promise<string>((resolve, reject) => {
+      // codeql[js/shell-command-injection-from-environment] - `file` is an absolute path from toolsets.executables (trusted config) or a default location built from SystemRoot/ProgramFiles (see Executables); execFile array args (no shell); env filtered via getProcessEnv/stripSensitiveEnvVars
       execFile(
         file,
         args,
         {
           ...options,
           maxBuffer: 1000 * 1024 * 1024,
-          env: getProcessEnv(options == null ? null : options.env), // codeql[js/shell-command-injection-from-environment] - env filtered via getProcessEnv/stripSensitiveEnvVars; execFile array args (no shell)
+          env: getProcessEnv(options == null ? null : options.env),
         },
         (error, stdout, stderr) => {
           if (error == null) {
@@ -298,6 +312,14 @@ export function spawnAndWrite(command: string, args: Array<string>, data: string
   const childProcess = doSpawn(command, args, options, { isPipeInput: true })
   const timeout = setTimeout(() => childProcess.kill(), 4 * 60 * 1000)
   return new Promise<any>((resolve, reject) => {
+    const rejectAndClearTimeout = (error: Error) => {
+      try {
+        clearTimeout(timeout)
+      } finally {
+        reject(error)
+      }
+    }
+
     handleProcess(
       "close",
       childProcess,
@@ -309,16 +331,10 @@ export function spawnAndWrite(command: string, args: Array<string>, data: string
           resolve(undefined)
         }
       },
-      error => {
-        try {
-          clearTimeout(timeout)
-        } finally {
-          reject(error)
-        }
-      }
+      rejectAndClearTimeout
     )
 
-    childProcess.stdin!.end(data)
+    endStdin(childProcess, data, rejectAndClearTimeout)
   })
 }
 
@@ -358,7 +374,10 @@ export function spawnAndWriteWithOutput(command: string, args: Array<string>, da
       }
     })
 
-    childProcess.stdin!.end(data)
+    endStdin(childProcess, data, (err: Error) => {
+      clearTimeout(timeout)
+      reject(err)
+    })
 
     childProcess.once("close", (code: number) => {
       clearTimeout(timeout)
@@ -371,6 +390,20 @@ export function spawnAndWriteWithOutput(command: string, args: Array<string>, da
       }
     })
   })
+}
+
+// The child may exit (closing its stdin) before all data is written. The resulting "reader went away" write error is
+// expected and must not surface as an unhandled 'error' event: the exit code reported on "close" decides success or failure.
+// POSIX reports EPIPE (or ECONNRESET); on Windows libuv maps ERROR_BROKEN_PIPE to UV_EOF, surfaced as code "EOF".
+const STDIN_CLOSED_ERROR_CODES = new Set(["EPIPE", "ECONNRESET", "EOF"])
+
+function endStdin(childProcess: ChildProcess, data: string, reject: (error: Error) => void) {
+  childProcess.stdin!.on("error", (error: NodeJS.ErrnoException) => {
+    if (!STDIN_CLOSED_ERROR_CODES.has(error.code ?? "")) {
+      reject(error)
+    }
+  })
+  childProcess.stdin!.end(data)
 }
 
 export function spawn(command: string, args?: Array<string> | null, options?: SpawnOptions, extraOptions?: ExtraSpawnOptions): Promise<any> {
@@ -512,11 +545,14 @@ export function getPlatformIconFileName(value: string | Nullish, isMac: boolean)
     return null
   }
 
-  if (!value.includes(".")) {
-    return `${value}.${isMac ? "icns" : "ico"}`
+  const targetExtension = isMac ? ".icns" : ".ico"
+  const sourceExtension = isMac ? ".ico" : ".icns"
+  const extension = path.extname(value)
+  if (extension === "") {
+    return value + targetExtension
   }
 
-  return value.replace(isMac ? ".ico" : ".icns", isMac ? ".icns" : ".ico")
+  return extension.toLowerCase() === sourceExtension ? value.slice(0, -extension.length) + targetExtension : value
 }
 
 export function isPullRequest() {

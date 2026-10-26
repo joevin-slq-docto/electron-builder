@@ -1,5 +1,152 @@
 # builder-util
 
+## 27.0.0-alpha.13
+### Patch Changes
+
+- Fix(win): build-time Windows PowerShell, including the signature read-back of `forceCodeSigning` and the `publisherName` check, is always resolved through `toolsets.executables` (default: the in-box Windows PowerShell under `SystemRoot`), so a configured `toolsets.executables.powershell` is used without reading `SystemRoot`. _[`#10453`](https://github.com/electron-userland/electron-builder/pull/10453) [`ed05bd0`](https://github.com/electron-userland/electron-builder/commit/ed05bd0f734dd3b898b9c43c81abd56c08d242ef)_
+- Fix: secrets in logs and error messages (passwords, tokens and keys in redacted command lines, environments and request options) are shown as a fingerprint keyed with a random secret of the process, derived with scrypt: the same value has the same fingerprint within a run, but a fingerprint cannot be checked against guessed values offline. A value whose fingerprint cannot be computed is shown as `<redacted>`. _[`#10441`](https://github.com/electron-userland/electron-builder/pull/10441) [`955cd00`](https://github.com/electron-userland/electron-builder/commit/955cd00bd32f4dff0fd5f120b5c7bdad92ea1d7f)_
+- Fix: electron-builder starts `codesign`, `stapler`, `pkgutil` and Windows PowerShell by absolute path, from `toolsets.executables` or their default locations, for the signature checks of `forceCodeSigning` and `electron-builder verify`, for re-signing the Electron framework after embedding the ASAR integrity digest and for reading the Team ID of nested binaries; the keychain it creates trusts the configured `codesign` and `productbuild`. New `toolsets.executables` keys: `stapler` (located with `/usr/bin/xcrun --find stapler` by default) and `pkgutil` (`/usr/sbin/pkgutil` by default). The signature checks pass `mac.sign.strictVerify` to `codesign --verify` as `true`, `false` or a comma-separated list of the `--strict` keywords `all`, `symlinks` and `sideband`; another value is a configuration error. Reading an Authenticode signature back starts PowerShell without the build's credential variables. `electron-builder verify` uses public keys only: without a packaged app's trust list it verifies update manifests against `updateManifest.publicKey`, and reports them as unverifiable when that is not set; it never loads a signing key. It honors `mas.sign` / `masDev.sign` opt-outs for Mac App Store apps, reads only the app output directories of the targets, and reads an app's `app-update.yml` only as a file inside the app, reporting one that is a symlink out of the app, invalid YAML or not a mapping as a failed check. The Team ID of a signing identity name is parsed in linear time. _[`#10440`](https://github.com/electron-userland/electron-builder/pull/10440) [`046f936`](https://github.com/electron-userland/electron-builder/commit/046f9365cf923a22dc1504297702b3625ed473fb)_
+- Electron-builder starts the host programs it uses only from an absolute path, never by looking up a name on `PATH`: PowerShell, Wine, Mono (Squirrel.Windows on macOS and Linux), `prlctl`, `productbuild`, `pkgbuild`, `codesign`, `hdiutil`, `tiffutil`, `sips`, `actool`, `zip`, `notarytool` (passed to `@electron/notarize` as `notarytoolPath`, located with `/usr/bin/xcrun` by default), `lzip`, `snapcraft`, `flatpak` and `flatpak-builder`. Each comes from its default install locations or from the new `toolsets.executables` map, whose entries are `file://` URIs, or lists of them, that replace the defaults for that program. Child processes started without an explicit environment get no credential variables on Windows either, and `snapcraft upload` gets the store credentials but no other secret. The NSIS installer starts `tasklist` and `taskkill` from `$SYSDIR` (and passes the force flag in per-machine mode), the AppImage launcher runs the dialog tool it checked by its absolute path, and electron-updater on macOS starts `/usr/sbin/sysctl` and `/usr/bin/uname`. _[`#10430`](https://github.com/electron-userland/electron-builder/pull/10430) [`b98e1f2`](https://github.com/electron-userland/electron-builder/commit/b98e1f2910edaa14b554e603d3ff509c8b04ccf2)_
+
+<details><summary>Updated 1 dependency</summary>
+
+<small>
+
+[`6393d7a`](https://github.com/electron-userland/electron-builder/commit/6393d7ae75d15da5147691b135c5bcc7aa520f35) [`5028cb3`](https://github.com/electron-userland/electron-builder/commit/5028cb37a21b8bdd6d9447e858eacfb8e3834004) [`2d97c85`](https://github.com/electron-userland/electron-builder/commit/2d97c85e3e3e63aade6497923d3012ce0569e414) [`955cd00`](https://github.com/electron-userland/electron-builder/commit/955cd00bd32f4dff0fd5f120b5c7bdad92ea1d7f) [`674e18d`](https://github.com/electron-userland/electron-builder/commit/674e18dd3e6d2720c46b42ce309cac83ae760e14) [`2d97c85`](https://github.com/electron-userland/electron-builder/commit/2d97c85e3e3e63aade6497923d3012ce0569e414) [`674e18d`](https://github.com/electron-userland/electron-builder/commit/674e18dd3e6d2720c46b42ce309cac83ae760e14) [`ed05bd0`](https://github.com/electron-userland/electron-builder/commit/ed05bd0f734dd3b898b9c43c81abd56c08d242ef) [`ed05bd0`](https://github.com/electron-userland/electron-builder/commit/ed05bd0f734dd3b898b9c43c81abd56c08d242ef) [`8366dc6`](https://github.com/electron-userland/electron-builder/commit/8366dc690ba5bc453c45f6ebbb8f8ad3561521df) [`a7f005c`](https://github.com/electron-userland/electron-builder/commit/a7f005ce837df409cc7cf9049e3eff74a2d5a503)
+
+</small>
+
+- `builder-util-runtime@10.0.0-alpha.12`
+
+</details>
+
+## 27.0.0-alpha.12
+### Major Changes
+
+- Feat(signing)!: `ELECTRON_BUILDER_UPDATE_SIGN_KEY` takes the PEM file base64-encoded on one line, so CI systems such as GitLab can mask it (#10344) — encode it with `base64 < update-private-key.pem | tr -d '\n'`, and for key rotation concatenate the PEM files and encode them once (`cat old.pem new.pem | base64 | tr -d '\n'`). BREAKING for the 27.0.0 alphas: a raw PEM, or any value that is not the standard base64 of complete PEM private keys (quoted, URL-safe, truncated, separately encoded keys joined together), now fails with an `InvalidConfigurationError` that never prints the value, and invalid or duplicate signing keys from any source are reported as an `InvalidConfigurationError` too; `ELECTRON_BUILDER_UPDATE_SIGN_KEY_FILE` and `updateManifest.signingKey` / `signingKeyFile` still take PEM, and `electron-builder create-update-key` prints the encode command for the key file it writes. _[`#10347`](https://github.com/electron-userland/electron-builder/pull/10347) [`f8a6719`](https://github.com/electron-userland/electron-builder/commit/f8a6719bded7b02881f7b88778f1645a53321825)_
+
+### Patch Changes
+
+- Fix(signing): a base64 `CSC_LINK` / `WIN_CSC_LINK` / `CSC_INSTALLER_LINK` / `SNAP_CSC_LINK` / `cscLink` value must be valid standard base64 (line breaks are ignored; encode it with `base64 -w0` or `openssl base64 -A`) — a value with surrounding quotes, URL-safe characters or other stray characters fails with an `InvalidConfigurationError` that does not print the value; adds the strict `decodeStrictBase64` helper to builder-util. _[`#10347`](https://github.com/electron-userland/electron-builder/pull/10347) [`f8a6719`](https://github.com/electron-userland/electron-builder/commit/f8a6719bded7b02881f7b88778f1645a53321825)_
+- Fix: only replace terminal platform icon extensions _[`#10129`](https://github.com/electron-userland/electron-builder/pull/10129) [`08d4a10`](https://github.com/electron-userland/electron-builder/commit/08d4a10765028f9a36c88aefcae4cbdc421dd358)_
+- Feat!: add `fileOptions.excludedExts` (root and per platform, a list or a single string such as `-c.fileOptions.excludedExts=default`) to configure the file extensions excluded from the app files and the copied `node_modules` — `"default"` is the built-in list, which now includes `pdb`, any other entry adds an extension, and `"!ext"` removes one (a list of removals only, such as `["!pdb"]`, is rejected: write `["default", "!pdb"]`; an invalid list fails the build when the configuration is validated, at the root and in every platform section); a later layer's list replaces an earlier one instead of being merged with it (`extends` child, programmatic or `-c` configuration, platform section, `mas` / `masDev`); a `files` pattern that names an excluded extension (e.g. `native/addon.pdb`) re-includes only the files it matches. BREAKING: removed the `includePdb` option — `electron-builder migrate-schema` rewrites `includePdb: true` to `"fileOptions": { "excludedExts": ["default", "!pdb"] }` and `includePdb: false` to `"fileOptions": { "excludedExts": ["default"] }`. _[`#10339`](https://github.com/electron-userland/electron-builder/pull/10339) [`0b508ab`](https://github.com/electron-userland/electron-builder/commit/0b508abc19243c7309931c693f7b91bc66d62fb9)_
+- Fix: cancel original async tasks in AsyncTaskManager _[`#10133`](https://github.com/electron-userland/electron-builder/pull/10133) [`b1460cc`](https://github.com/electron-userland/electron-builder/commit/b1460cc01adb394db3cffd1ba4b547b4181c562d)_
+
+<details><summary>Updated 1 dependency</summary>
+
+<small>
+
+[`45d3bc4`](https://github.com/electron-userland/electron-builder/commit/45d3bc431b5274b38b6b50b0b299d9ae6575469b) [`538aef4`](https://github.com/electron-userland/electron-builder/commit/538aef405d68940cb1322147ab050c24eb581342) [`8b71ed8`](https://github.com/electron-userland/electron-builder/commit/8b71ed87224beed7c0674fdd312d54047095d965) [`370d18c`](https://github.com/electron-userland/electron-builder/commit/370d18cb25e18b204d9ddbaf010879f8939cbeef) [`46be1f4`](https://github.com/electron-userland/electron-builder/commit/46be1f48e51a59b846ca76e631fc9e4e33348fb5) [`60e3708`](https://github.com/electron-userland/electron-builder/commit/60e3708955724138009f157cf0ad3f80a36ddeae)
+
+</small>
+
+- `builder-util-runtime@10.0.0-alpha.11`
+
+</details>
+
+## 27.0.0-alpha.11
+### Major Changes
+
+- Fix: confine copies to the app output directory by real path, so that a symlink among copied files (app directory, `extraResources`/`extraFiles`/`extraDistFiles` sources, `node_modules`) cannot make electron-builder write or package files elsewhere on the build machine; opt in to external links with `fileOptions.allowExternalLinks`. `copyDir` (extraResources/extraFiles) and the `asar: false` app copy refuse a destination whose directory resolves outside the app output directory, replace (never follow) a symlink at a destination file, and recreate a symlink only when it stays inside the output (or, for extraResources/extraFiles, leads into the workspace or the package-manager store, with a one-time warning). The fixed-name files written after the copies (`app-update.yml`, `package-type`, `apparmor-profile`, NSIS `elevate.exe`, the snap `command.sh`, `Squirrel.exe` and the Squirrel execution stub) replace a symlink at their name instead of writing through it. Windows `zip`/`7z` archives, the NSIS app package, AppX/MSIX and Squirrel.Windows packages, which store what a symlink points to, refuse a symlink that leaves the app. An intended symlink of this kind is allowed by the `fileOptions.allowExternalLinks` build option (`true`, or a list of directories its real target may be in; at the top level or per platform, a platform's value replacing the top-level one), with a one-time warning; a write through a symlink is always refused. Errors are `InvalidConfigurationError` with code `ERR_ELECTRON_BUILDER_PATH_OUTSIDE_ROOT`, suggest the `fileOptions.allowExternalLinks` entry and link to https://www.electron.build/docs/contents#symlinks-that-leave-the-app-are-refused. New builder-util helpers: `assertWritableWithin`, `prepareFixedNameWrite`, `WriteContainment`, `resolvePhysicalPath`, `findEscapingSymlinks`, `assertNoSymlinkLeaves`, `ExternalLinkPolicy`. _[`#10321`](https://github.com/electron-userland/electron-builder/pull/10321) [`08e8044`](https://github.com/electron-userland/electron-builder/commit/08e80443d3470f2d6bf5a0075e54f4e906079c9b)_
+
+### Minor Changes
+
+- Feat(builder-util): `log.limit({ key, max, scope })` / `log.once(key, scope)` emit a keyed message at most N times (per process, or per scope object), replacing hand-rolled "already warned" flags; electron-updater counts once-per-updater warnings internally without changing the injectable `Logger` interface. Both share one limiter (`wrap()` on any `{ info, warn, error, debug? }` logger, including `console`), and its `LogLevel`, `LogLimitOptions`, `LoggerLike` and `LimitedLogger` types are now exported from builder-util-runtime (builder-util re-exports them) _[`#10302`](https://github.com/electron-userland/electron-builder/pull/10302) [`5cbbc8d`](https://github.com/electron-userland/electron-builder/commit/5cbbc8de8e0fb585cfa97e80644e8a29ab7d8ff4)_
+
+### Patch Changes
+
+- Fix: honor uppercase http(s) proxy environment variables _[`#10132`](https://github.com/electron-userland/electron-builder/pull/10132) [`ea41d9a`](https://github.com/electron-userland/electron-builder/commit/ea41d9af10840fbb56d60ff701e1282a0e16a6fb)_
+- Fix: reject shell line-break characters _[`#10131`](https://github.com/electron-userland/electron-builder/pull/10131) [`8854be3`](https://github.com/electron-userland/electron-builder/commit/8854be3dda9bc3f51a71ad44b51961b946a8c99e)_
+
+<details><summary>Updated 1 dependency</summary>
+
+<small>
+
+[`68aa2ff`](https://github.com/electron-userland/electron-builder/commit/68aa2ff1d5bc713819cd98bfb34c890fbe03a93a) [`2fdbcae`](https://github.com/electron-userland/electron-builder/commit/2fdbcae5b136c486d3afa3e564d032b5a79dae05) [`5cbbc8d`](https://github.com/electron-userland/electron-builder/commit/5cbbc8de8e0fb585cfa97e80644e8a29ab7d8ff4) [`8f55928`](https://github.com/electron-userland/electron-builder/commit/8f5592839b6b2752754c19b8b7190ec86f55ef94) [`434f6e9`](https://github.com/electron-userland/electron-builder/commit/434f6e98b017c14176be9aaf06891f09624c88fc)
+
+</small>
+
+- `builder-util-runtime@10.0.0-alpha.10`
+
+</details>
+
+## 27.0.0-alpha.10
+
+### Patch Changes
+
+- Fix: handle EPIPE on child stdin in `spawnAndWrite` / `spawnAndWriteWithOutput` when the process exits before all input is written _[`#10275`](https://github.com/electron-userland/electron-builder/pull/10275) [`6e84132`](https://github.com/electron-userland/electron-builder/commit/6e841322856c4d3aca91ae0783aa38f61fe21a40) [@claude](https://github.com/apps/claude)_
+- Fix: preserve repeated debug logger key segments _[`#10130`](https://github.com/electron-userland/electron-builder/pull/10130) [`4bc95cc`](https://github.com/electron-userland/electron-builder/commit/4bc95cce39b2862e798365dc4687443e64f001a1) [@OskarEichler](https://github.com/OskarEichler)_
+- Fix: preserve sibling paths in diagnostic path logging _[`#10152`](https://github.com/electron-userland/electron-builder/pull/10152) [`7619d08`](https://github.com/electron-userland/electron-builder/commit/7619d08a1c02049b0dd40e043346e5263c0a3e50) [@OskarEichler](https://github.com/OskarEichler)_
+- Chore: replace ESLint and Prettier with oxlint and oxfmt _[`#10240`](https://github.com/electron-userland/electron-builder/pull/10240) [`a578e53`](https://github.com/electron-userland/electron-builder/commit/a578e53441ede7f6fb3e9d69292dc135ef37ed17) [@claude](https://github.com/apps/claude)_
+
+<details><summary>Updated 1 dependency</summary>
+
+<small>
+
+[`ec9135d`](https://github.com/electron-userland/electron-builder/commit/ec9135d0626879479ffa4235006f06b14375cc43) [`ec9135d`](https://github.com/electron-userland/electron-builder/commit/ec9135d0626879479ffa4235006f06b14375cc43) [`ec9135d`](https://github.com/electron-userland/electron-builder/commit/ec9135d0626879479ffa4235006f06b14375cc43)
+
+</small>
+
+- `builder-util-runtime@10.0.0-alpha.9`
+
+</details>
+
+## 27.0.0-alpha.9
+
+### Minor Changes
+
+- Feat(security): signed update manifests (Ed25519) with trust lists and multi-signature manifests _[`#9877`](https://github.com/electron-userland/electron-builder/pull/9877) [`d45536f`](https://github.com/electron-userland/electron-builder/commit/d45536f74e63e5c19dd4a590238521f6315812f5) [@mmaietta](https://github.com/mmaietta)_
+
+  Optional Ed25519 signing of auto-update manifests (`latest*.yml`). When signing keys are configured
+  (`updateManifest.signingKey`/`signingKeyFile` in config, or `ELECTRON_BUILDER_UPDATE_SIGN_KEY`/`ELECTRON_BUILDER_UPDATE_SIGN_KEY_FILE`
+  env vars), each manifest is signed over its integrity-critical fields and the matching public keys are
+  embedded into `app-update.yml` (both resolved from the same keys on the platform packager, so signing and
+  embedding cannot disagree). electron-updater verifies the signature before downloading and refuses to
+  update on tamper/missing-signature (fail-closed). Opt-in: when no public key is configured, verification is
+  skipped with a one-time warning. New CLI: `electron-builder create-update-key` (prints the public key and its key id).
+
+  Key rotation without a flag day: an install trusts a **list** of public keys (`updateManifestPublicKey` is a
+  string or an array; `updateManifest.publicKey`, `signingKey` and `signingKeyFile` accept arrays, a PEM value may
+  hold several concatenated keys, and `ELECTRON_BUILDER_UPDATE_SIGN_KEY_FILE` accepts several paths joined with
+  the OS path delimiter), and a manifest may carry **several signatures** (`signatures: [{ keyId, signature }]`,
+  one per signing key, next to the legacy `signature` of the first key). A manifest is accepted when any trusted
+  key validates any of its signatures, so a release signed with `[old, new]` verifies on installs that trust
+  either. `AppUpdater.updateManifestPublicKey` accepts a string or an array. A build-time warning flags an
+  explicit `publicKey` list that contains none of the signing keys.
+
+  Gating of the Linux package-manager signature-bypass flags landed separately as
+  `AppUpdater.allowUnverifiedLinuxPackages` (#9990).
+
+### Patch Changes
+
+<details><summary>Updated 1 dependency</summary>
+
+<small>
+
+[`d45536f`](https://github.com/electron-userland/electron-builder/commit/d45536f74e63e5c19dd4a590238521f6315812f5) [`6ab9a8c`](https://github.com/electron-userland/electron-builder/commit/6ab9a8c5fbed759e0c9e26064208c422c612b200)
+
+</small>
+
+- `builder-util-runtime@10.0.0-alpha.8`
+
+</details>
+
+## 27.0.0-alpha.8
+
+### Patch Changes
+
+<details><summary>Updated 1 dependency</summary>
+
+<small>
+
+[`cf39086`](https://github.com/electron-userland/electron-builder/commit/cf39086fbb71e34d1fef0359a026697153e6ee3b)
+
+</small>
+
+- `builder-util-runtime@10.0.0-alpha.7`
+
+</details>
+
 ## 27.0.0-alpha.7
 
 ### Patch Changes

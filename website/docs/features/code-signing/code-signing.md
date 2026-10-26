@@ -7,8 +7,8 @@ Code signing proves your application's identity and confirms it hasn't been tamp
 | Platform | Without Signing | With Signing |
 |---|---|---|
 | macOS | Gatekeeper blocks app; user must override in System Preferences | Runs normally; no warning |
-| Windows | SmartScreen warning on first run ("Unknown publisher") | Trusted install; SmartScreen learns from reputation |
-| Windows (EV cert) | N/A | Instant trust, no reputation period needed |
+| Windows | SmartScreen warning on first run ("Unknown publisher") | Publisher name shown; SmartScreen warning until reputation builds |
+| Windows (EV cert) | N/A | Same as OV since 2024 — no instant trust (see [Windows Code Signing](code-signing-win.md)) |
 
 On **macOS 10.15+**, notarization is additionally required for apps distributed outside the Mac App Store. An app that is code-signed but not notarized will be blocked by Gatekeeper unless the user explicitly overrides it.
 
@@ -39,9 +39,9 @@ All Apple certificates require membership in the [Apple Developer Program](https
 
 | Certificate Type | Trust | CI/CD Compatible | Notes |
 |---|---|---|---|
-| Standard OV Certificate | After reputation builds (days-weeks) | Yes (exportable `.pfx`) | Most common choice |
-| EV (Extended Validation) Certificate | Immediate | Yes, via a hardware-token method | Key bound to a hardware dongle/HSM; not exportable to a file |
-| Azure Trusted Signing | Immediate | Yes | Microsoft's cloud signing service; see [code-signing-win.md](code-signing-win.md) |
+| Standard OV Certificate | After reputation builds (weeks) | Yes (exportable `.pfx`) | Most common choice |
+| EV (Extended Validation) Certificate | After reputation builds — same as OV since 2024 | Yes, via a hardware-token method | Key bound to a hardware dongle/HSM; not exportable to a file |
+| Azure Trusted Signing | After reputation builds | Yes | Microsoft's cloud signing service; see [code-signing-win.md](code-signing-win.md). Microsoft: it "does not provide instant SmartScreen trust" ([source](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/code-signing-options)) |
 
 For Windows, purchase from any major CA (DigiCert, Sectigo, SSL.com). See [Get a Code Signing Certificate](https://msdn.microsoft.com/windows/hardware/drivers/dashboard/get-a-code-signing-certificate) (select "Microsoft Authenticode" platform).
 
@@ -102,8 +102,8 @@ Most CI systems inject certificates as base64-encoded environment variables:
 base64 -i your-certificate.p12 -o /tmp/cert_encoded.txt
 cat /tmp/cert_encoded.txt   # copy this value into your CI secret
 
-# Linux
-base64 your-certificate.p12 > /tmp/cert_encoded.txt
+# Linux (-w0: one line, which masked CI variables require)
+base64 -w0 your-certificate.p12 > /tmp/cert_encoded.txt
 cat /tmp/cert_encoded.txt
 ```
 
@@ -114,9 +114,29 @@ CSC_LINK=<the-base64-string>
 CSC_KEY_PASSWORD=your-password
 ```
 
+The value must be standard base64; see [Base64 certificate values](#base64-certificate-values).
+
 :::warning[Windows environment variable length limit]
 Windows cannot handle environment variable values longer than 8192 characters. If your base64-encoded certificate exceeds this limit, re-export it **without** including intermediate certificates in the chain (uncheck "Include all certificates in the certification path" in the Certificate Manager wizard).
 :::
+
+### Base64 certificate values {#base64-certificate-values}
+
+A `CSC_LINK`, `WIN_CSC_LINK`, `CSC_INSTALLER_LINK` or `SNAP_CSC_LINK` value — or a `cscLink` / `cscInstallerLink` option — is read as base64 when it has a `data:…;base64,` prefix, is longer than 2048 characters, or ends with `=`; any other value is a path, `file://` or `https://` link. A base64 value must be **standard base64**: `A-Z`, `a-z`, `0-9`, `+` and `/` with `=` padding. Line breaks in it are ignored. Surrounding quotes, URL-safe `-`/`_` characters, any other stray character or a truncated value fail the build with an `InvalidConfigurationError` that does not print the value.
+
+Encode the certificate file on one line and store the output without quotes:
+
+```bash
+base64 -w0 your-certificate.p12                # Linux (GNU coreutils)
+base64 -i your-certificate.p12                 # macOS
+openssl base64 -A -in your-certificate.p12     # anywhere OpenSSL is installed
+```
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path your-certificate.p12)))
+```
+
+In `cmd.exe`, write `set "CSC_LINK=…"`: `set CSC_LINK="…"` keeps the quotes in the value.
 
 ## GitHub Actions Setup
 
@@ -163,15 +183,27 @@ jobs:
 forceCodeSigning: true
 ```
 
-When `true`, the build **fails** if no valid signing identity can be found. Use this in CI to catch misconfigured secrets early rather than shipping an unsigned build.
+When `true`, the build **fails** whenever a signing step could not run, and checks what the signing steps produced. Use this in release pipelines to catch misconfigured secrets early rather than shipping an unsigned, unnotarized build, or one with unsigned update manifests.
 
 Without this option, electron-builder proceeds without signing if no credentials are provided — which can result in silently unsigned production builds.
+
+What it enforces:
+
+- **Code signing** — the build fails when no valid signing identity or certificate is found. On macOS signing needs a macOS host, and a pull-request build (where electron-builder skips signing unless `CSC_FOR_PULL_REQUEST=true`) fails too: pass `-c.forceCodeSigning=false` to builds that cannot sign. A prepackaged app, which electron-builder does not sign, must already be signed.
+- **Notarization (macOS)** — the notarization credentials must be set when the build starts, or it fails before anything is packed. After notarizing, `stapler validate` checks the stapled ticket. See [Notarization](notarization.md).
+- **Update manifests** — `latest*.yml` must be signed, also by a build that does not publish (on Linux this is the only effect). See [Signed Update Manifests](../signed-update-manifests.md).
+- **Verification** — every Windows file reported as signed is read back and must carry a valid Authenticode signature; the output of a custom `mac.sign` signer must pass `codesign --verify --deep --strict`; signed `pkg` installers must pass `pkgutil --check-signature`; a DMG with `dmg.sign: true` must be signed. Any valid signature counts, including ad-hoc and self-signed ones. These tools (`codesign`, `stapler`, `pkgutil`, and Windows PowerShell for `Get-AuthenticodeSignature`) are started by absolute path, from [`toolsets.executables`](../../toolsets.md#executables) or their default locations, never from `PATH`.
+
+Explicit opt-outs are honored, with a warning: `mac.notarize: false`, `updateManifest: false`, `win.signExts` exclusions and a custom `nsis.script`. `win.sign: false` and `mac.sign: null` contradict `forceCodeSigning` and fail the build.
+
+A platform-level value (`mac.forceCodeSigning`, `win.forceCodeSigning`, `linux.forceCodeSigning`) overrides the root one. Mac App Store targets cascade `mac` → `mas` → `masDev` like every other option, so `mas.forceCodeSigning` and `masDev.forceCodeSigning` apply to the `mas` / `mas-dev` targets only (for example `mas.forceCodeSigning: false` with `mac.forceCodeSigning: true` signs the MAS app without enforcing it). To check a finished build — for example artifacts downloaded from CI — run [`electron-builder verify`](../../cli.md#verify).
 
 ## Platform-Specific Guides
 
 - **[macOS Code Signing](code-signing-mac.md)** — exporting certificates, keychain setup, disabling signing, ad-hoc signing
 - **[Windows Code Signing](code-signing-win.md)** — OV vs. EV certificates, Azure Trusted Signing setup
 - **[macOS Notarization](notarization.md)** — notarizing apps for macOS 10.15+, Hardened Runtime requirements
+- **[Key Rotation](../key-rotation.md)** — replacing a code-signing certificate or update-manifest key without stranding installs that trust the old one
 
 ## Troubleshooting
 
@@ -188,10 +220,10 @@ Without this option, electron-builder proceeds without signing if no credentials
 : The `publisher` in `appx` config must exactly match the Subject of the certificate. Copy it from the certificate properties.
 
 **SmartScreen warning appears even after signing** (Windows)
-: Normal for standard OV certificates. SmartScreen trust builds over time based on download count. EV certificates skip this reputation period. See [Windows Code Signing](code-signing-win.md).
+: Normal for any certificate. SmartScreen trust builds over time from downloads of the file and of other files signed with the same certificate; since 2024, EV certificates no longer skip this period ([Microsoft](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/distribution-feature-status#smartscreen-reputation-ev-certificates-no-longer-grant-instant-bypass)). See [Windows Code Signing](code-signing-win.md).
 
 **"Command requires admin privileges"** (Windows)
 : Some signing tools require elevated permissions. Run from an elevated prompt or check CI runner permissions.
 
 **Build fails silently with unsigned output**
-: Set `forceCodeSigning: true` to convert missing signing credentials from a silent warning into a build failure.
+: Set `forceCodeSigning: true` to convert missing signing credentials — and skipped notarization or update-manifest signing — from a warning into a build failure, and run [`electron-builder verify`](../../cli.md#verify) to check a build's output.

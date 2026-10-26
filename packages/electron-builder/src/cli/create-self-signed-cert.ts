@@ -1,5 +1,5 @@
 import { getWindowsKitsBundle } from "app-builder-lib/internal"
-import { exec, log, spawn, TmpDir, unlinkIfExists } from "builder-util"
+import { exec, Executables, log, spawn, TmpDir, unlinkIfExists } from "builder-util"
 import { sanitizeFileName } from "builder-util/internal"
 import chalk from "chalk"
 import { mkdir } from "fs/promises"
@@ -23,11 +23,21 @@ export async function createSelfSignedCert(publisher: string) {
     const pfx = path.join(targetDir, `${sanitizeFileName(publisher)}.pfx`)
     await unlinkIfExists(pfx)
     await exec(path.join(vendorPath, "pvk2pfx.exe"), ["-pvk", pvk, "-spc", cer, "-pfx", pfx])
-    log.info({ file: pfx }, `created. Please see https://electron.build/code-signing how to use it to sign.`)
+    log.info({ file: pfx }, `created. Please see https://electron.build/docs/features/code-signing how to use it to sign.`)
 
     const certLocation = "Cert:\\LocalMachine\\TrustedPeople"
     log.info({ file: pfx, certLocation }, `importing. Operation will be succeed only if runned from root. Otherwise import  file manually.`)
-    await spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "Import-PfxCertificate", "-FilePath", `"${pfx}"`, "-CertStoreLocation", certLocation])
+    // this command loads no configuration: Windows PowerShell from its default location
+    await spawn(Executables.resolve("powershell"), [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "Import-PfxCertificate",
+      "-FilePath",
+      `"${pfx}"`,
+      "-CertStoreLocation",
+      certLocation,
+    ])
   } finally {
     await tmpDir.cleanup()
   }

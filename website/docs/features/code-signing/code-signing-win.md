@@ -3,7 +3,7 @@
 Windows code signing is supported and runs automatically once you configure a signing method — or simply provide signing credentials through environment variables. electron-builder signs every executable and installer it produces so that Windows SmartScreen and your auto-updater can verify your app's publisher and confirm it hasn't been tampered with.
 
 :::tip[Dual signing]
-By default each binary is dual-signed with both SHA-1 and SHA-256 (`signingHashAlgorithms: ["sha1", "sha256"]`) so it validates on legacy as well as modern Windows. A few targets are fixed: `.msi` is single-signed and AppX/MSIX is SHA-256 only.
+By default each binary is dual-signed with both SHA-1 and SHA-256 (`signingHashAlgorithms: ["sha1", "sha256"]`) so it validates on legacy as well as modern Windows. A few targets are fixed: `.msi` holds a single signature, which is SHA-256 unless `sha1` is the only algorithm listed, and AppX/MSIX is SHA-256 only.
 :::
 
 ## Choosing a signing method
@@ -20,7 +20,7 @@ electron-builder offers several signing backends, selected by the `type` field o
 For file- or store-based signing you need a Windows code signing certificate from a CA (DigiCert, Sectigo, SSL.com, …). They come in two grades:
 
 - **OV (Organization Validation)** — the common, lower-cost option. New publishers see a SmartScreen "unknown publisher" warning during install that fades as your download reputation grows. OV certificates export to a `.pfx`, so they work in CI with the `signtool` method.
-- **EV (Extended Validation)** — earns SmartScreen reputation immediately, but its private key is bound to a hardware token and **cannot** be exported to a file. Identify an EV certificate by `certificateSubjectName` or `certificateSha1` rather than a file path, and sign with the `hsm` (Windows) or `pkcs11` (macOS/Linux) method — or switch to `azure` to avoid managing hardware at all.
+- **EV (Extended Validation)** — since 2024 no longer earns SmartScreen reputation immediately; Microsoft treats EV and OV code signing certificates the same for SmartScreen ([details](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/distribution-feature-status#smartscreen-reputation-ev-certificates-no-longer-grant-instant-bypass)). Its private key is bound to a hardware token and **cannot** be exported to a file. Identify an EV certificate by `certificateSubjectName` or `certificateSha1` rather than a file path, and sign with the `hsm` (Windows) or `pkcs11` (macOS/Linux) method — or switch to `azure` to avoid managing hardware at all.
 
 Both grades work with auto-update.
 
@@ -41,9 +41,21 @@ All Windows code signing is configured under a single `win.sign` key using a dis
 | `{ type: "hsm", ... }` | Hardware Security Module / FIPS token via a Windows CSP — **Beta** | Windows only |
 | `{ type: "pkcs11", ... }` | PKCS#11 hardware token via `osslsigncode` — **Beta** | macOS/Linux |
 | `{ type: "azure", ... }` | Azure Trusted Signing cloud service — **Beta** | all (`signtool /dlib`, Wine on macOS/Linux) |
-| `false` or `null` | Disable signing (resedit resource editing still runs) | all |
+| `false` or `null` | Disable signing (resedit resource editing still runs). No certificate is read, not even from `WIN_CSC_LINK` / `CSC_LINK`, so no `publisherName` is derived: a build that writes `app-update.yml` then fails unless you also set `win.verifyUpdateCodeSignature: false` (the update-verification opt-out, written into `app-update.yml`). If you sign the build outside electron-builder, use `{ type: "signtool", publisherName: [...] }` (or a custom `sign` hook with `publisherName`) instead, so `app-update.yml` carries the publisher electron-updater verifies updates against | all |
 
-Combining `win.sign: false` with `forceCodeSigning: true` is a configuration error and fails the build.
+Combining `win.sign: false` with `forceCodeSigning: true` is a configuration error and fails the build, also for a prepackaged app. With `forceCodeSigning`, every file a signing step reports as signed is read back and must carry a valid Authenticode signature — so a custom `sign` hook must sign the file at `configuration.path` in place — and the executable of a prepackaged app, which electron-builder does not sign, must already be signed.
+
+### Publisher name and update verification
+
+When your app uses electron-updater, the resolved `publisherName` (your explicit `win.sign.publisherName`, or `CN=<common name>` of the certificate) is written into `app-update.yml`, and electron-updater refuses to install a downloaded NSIS update whose Authenticode signer does not match it. To catch a wrong `publisherName` before you ship, electron-builder checks the signed installer itself at build time — the `nsis` installer, or the `nsis-web` stub — with the same matching rules electron-updater applies, and fails the build if the signer does not match. Because it inspects the signed output, this also covers signing routes where the certificate is not known up front: a custom `sign` hook, Azure Trusted Signing and PKCS#11.
+
+- Each `publisherName` entry must be a distinguished name (DN) of the certificate's subject (e.g. `CN=My Company, O=My Company, L=Berlin, S=Berlin, C=DE`). It must match every attribute it lists; attributes it leaves out are not compared, and attribute names are the ones Windows shows in the certificate subject (for example `S` for the state or province, not `ST`).
+- A bare name (`My Company`) fails the build since v27 — electron-updater 7 never matches one. See [the v27 migration guide](../../migration/v27-build-changes.md#windows-publishername-must-be-a-distinguished-name).
+- Without `publisherName`, the derived value is `CN=<common name>` of the certificate, quoted the way Windows quotes it in the subject. Only the CN is compared, so a renewed certificate with the same CN keeps updates working even when its other subject attributes change. For a stricter pin, set a fuller DN explicitly; a renewal that changes an attribute you configured then needs a release, signed with the old certificate, that lists both DNs before you switch (see [key rotation](../key-rotation.md#windows-code-signing-certificate-rotation)).
+- The signer is read with `Get-AuthenticodeSignature` on Windows (a signature it cannot read fails the build) and from the installer's embedded signature on macOS/Linux (a signature that cannot be parsed there is only warned about).
+- Without any `publisherName` — `win.sign: false` / `null`, no certificate, or `publisherName: null` — a build that writes `app-update.yml` fails with `InvalidConfigurationError` since v27, because electron-updater 7 rejects every update of an app whose `app-update.yml` has none. `win.verifyUpdateCodeSignature: false` is the only opt-out: the build then writes `verifyUpdateCodeSignature: false` instead of a `publisherName`, and electron-updater installs updates without verifying their signature. See [the v27 migration guide](../../migration/v27-build-changes.md#missing-publishername-fails-update-verification).
+- electron-updater installs an update only when PowerShell (`Get-AuthenticodeSignature`) verifies it. When PowerShell cannot be started (for example because it is blocked by AppLocker), fails, times out or reports a signature from a Windows security catalog instead of one embedded in the installer, the update is rejected (a catalog-signed installer can be accepted with the opt-in `autoUpdater.allowCatalogSignature = true`, or per release with `win.allowCatalogSignature: true` in a [signed update manifest](../signed-update-manifests.md), when the catalog signer matches `publisherName`). Where PowerShell may not run on your users' machines, [plug in a native verifier](../../win.md#how-do-you-use-a-custom-verify-function-to-enable-nsis-signature-verification-alternatives-instead-of-powershell) in your first release built with electron-updater 7. See [the v27 migration guide](../../migration/v27-runtime-changes.md#windows-update-signature-verification-fails-closed).
+- The check runs only when the installer was signed by electron-builder (or your `sign` hook), `win.verifyUpdateCodeSignature` is enabled and `app-update.yml` carries a `publisherName`. Set `win.verifyUpdateCodeSignature: false` only if your updates are not Authenticode-signed. Signing that happens after electron-builder finishes is not checked.
 
 ---
 
@@ -94,6 +106,8 @@ For EV certificates (bound to a USB dongle), identify by subject name instead:
 2. Each file is signed once per entry in `signingHashAlgorithms` — by default SHA-1, then SHA-256 with the second signature appended as a nested signature.
 3. On Windows the signer is Microsoft `signtool.exe`; on macOS/Linux it is `osslsigncode` from the `winCodeSign` toolset bundle — no Wine or Windows VM is involved. Note: certificate-store lookups (`certificateSubjectName` / `certificateSha1`) read the Windows store and therefore require Windows (or the bundled Windows VM), whereas file-based signing works on any platform.
 
+Certificate-store lookups and the legacy Azure Trusted Signing integration run PowerShell, which electron-builder starts by absolute path and never looks up on `PATH`; [`toolsets.executables`](../../toolsets.md#executables) (`powershell`, `pwsh`) sets other locations. On Windows it uses PowerShell 7 from `%ProgramFiles%\PowerShell\7\pwsh.exe`, the install location of its MSI installer, and otherwise Windows PowerShell from `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`; `SystemRoot` and `ProgramFiles` must be drive-absolute paths such as `C:\Windows`. Inside a Parallels VM it uses Windows PowerShell from `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, the location of a default Windows installation; PowerShell 7 is not used there, because `prlctl exec` cannot start a path that contains a space. On macOS and Linux it uses `pwsh` from the install location of Microsoft's package: `/usr/local/microsoft/powershell/7/pwsh` on macOS, `/opt/microsoft/powershell/7/pwsh` or `/snap/bin/pwsh` on Linux.
+
 ### Configuration reference
 
 {!./app-builder-lib.Interface.WindowsSigntoolSigningConfig.md!}
@@ -108,14 +122,14 @@ HSM signing is available in v27 as a **beta** feature. The configuration interfa
 
 Signs using a Hardware Security Module (HSM), FIPS-compliant token, or smart card via `signtool.exe`'s `/csp` (cryptographic service provider) and `/kc` (key container) flags. The private key never leaves the hardware; only the public certificate chain needs to be accessible to electron-builder.
 
-**Platform:** Windows only. For macOS/Linux CI without a Windows VM, use [`type: "pkcs11"`](#pkcs11-signing-typepkcs11-beta) instead.
+**Platform:** Windows only. For macOS/Linux CI without a Windows VM, use [`type: "pkcs11"`](#pkcs11-signing-type-pkcs11-beta) instead.
 
 **Requirement:** a modern `winCodeSign` toolset, which is the default — you do not need to pin a version. Only an explicit legacy pin (`toolsets.winCodeSign: "0.0.0"`) is unsupported, because it predates the required signtool version.
 
 ### Setup
 
 1. Install the CSP driver for your HSM/token on the build machine. Examples:
-   - Google Cloud KMS: the [Cloud KMS Windows CNG Provider](https://cloud.google.com/kms/docs/reference/code-signing).
+   - Google Cloud KMS: the [Cloud KMS Windows CNG Provider](https://cloud.google.com/kms/docs/reference/cng-provider).
    - Smart card / FIPS token: `"Microsoft Base Smart Card Crypto Provider"` (built into Windows).
 2. Obtain the certificate chain file (`.crt`, `.cer`, or `.pfx` — public key only).
 3. Configure electron-builder:
@@ -146,7 +160,8 @@ The default `winCodeSign` toolset already supports HSM signing, so no `toolsets`
 
 - **Windows only.** The `/csp` and `/kc` flags are signtool-specific. On macOS/Linux, use `type: "pkcs11"`.
 - The CSP driver must be installed on the machine where the build runs (not available in most cloud CI environments without extra setup).
-- `certificateFile`, `certificateSha1`, or `certificateSubjectName` must be provided — HSM signing requires a certificate identifier (unlike signtool where the cert can be embedded in the token implicitly).
+- `certificateFile`, `certificateSha1`, or `certificateSubjectName` must be provided unless a custom `sign` hook does the signing — HSM signing requires a certificate identifier (unlike signtool where the cert can be embedded in the token implicitly).
+- Set `publisherName` to the certificate subject (a distinguished name) when electron-builder cannot read it — a custom `sign` hook without a certificate identifier, or a `.crt`/`.cer` without a Common Name (CN). Otherwise a build that writes `app-update.yml` fails, because electron-updater needs the publisher name to verify updates.
 
 ### Configuration reference
 
@@ -162,7 +177,7 @@ PKCS#11 signing is available in v27 as a **beta** feature. The configuration int
 
 Signs using a PKCS#11 hardware token via `osslsigncode`. Unlike HSM signing, this works on macOS and Linux without a Windows VM, making it suitable for cloud CI environments where a physical token is accessible via network HSM or PKCS#11-over-network software.
 
-**Platform:** macOS and Linux only (uses `osslsigncode`). On Windows, use [`type: "hsm"`](#hsm-signing-typehsm-beta) instead.
+**Platform:** macOS and Linux only (uses `osslsigncode`). On Windows, use [`type: "hsm"`](#hsm-signing-type-hsm-beta) instead.
 
 ### Setup
 
@@ -179,7 +194,8 @@ Signs using a PKCS#11 hardware token via `osslsigncode`. Unlike HSM signing, thi
     "sign": {
       "type": "pkcs11",
       "pkcs11Module": "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so",
-      "pkcs11KeyUri": "pkcs11:token=MyToken;object=MyKey;type=private"
+      "pkcs11KeyUri": "pkcs11:token=MyToken;object=MyKey;type=private",
+      "publisherName": "CN=My Company, O=My Company, C=US"
     }
   }
 }
@@ -219,6 +235,7 @@ With an optional external certificate chain file (if the token does not carry th
 - **macOS/Linux only.** Throws `InvalidConfigurationError` when called on Windows; use `type: "hsm"` on Windows.
 - The `osslsigncode` binary is bundled in the `winCodeSign` toolset — no manual installation needed.
 - The PKCS#11 shared library (`.so` / `.dylib`) must be installed separately on the build machine.
+- `publisherName` (the certificate subject) is required when there is no `certificateFile`, and, for builds that write `app-update.yml`, when the `certificateFile` has no Common Name (CN) — electron-builder cannot read the certificate on the token.
 - Network or USB token latency can make large builds slow. Consider signing only final installers rather than every intermediate `.exe`.
 
 ### Configuration reference

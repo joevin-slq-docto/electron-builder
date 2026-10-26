@@ -52,7 +52,7 @@ Quick reference for terms used throughout the electron-builder documentation.
 : macOS security declarations that grant your app specific capabilities. Required when Hardened Runtime is enabled. Stored in `.plist` XML files referenced by `mac.sign.entitlements` and `mac.sign.entitlementsInherit`. Examples: `com.apple.security.cs.allow-jit` (required by Electron), `com.apple.security.network.client` (outbound networking).
 
 **EV Certificate (Extended Validation)**
-: A Windows code signing certificate with higher trust than standard OV certificates. EV certificates are physically bound to a USB security key and cannot be exported — which makes them incompatible with most CI/CD systems. SmartScreen immediately trusts EV-signed installers without requiring a reputation-building period.
+: A Windows code signing certificate with higher trust than standard OV certificates. EV certificates are physically bound to a USB security key and cannot be exported — which makes them incompatible with most CI/CD systems. Since 2024, SmartScreen no longer treats EV-signed installers differently from OV-signed ones; both build reputation over time.
 
 ---
 
@@ -110,7 +110,7 @@ Quick reference for terms used throughout the electron-builder documentation.
 ## N
 
 **Notarization**
-: Apple's service that scans your app for malware and issues a cryptographic ticket confirming the scan. Required for distributing apps outside the Mac App Store on macOS 10.15+. electron-builder handles notarization automatically when `mac.notarize: true`. See [Notarization](notarization.md).
+: Apple's service that scans your app for malware and issues a cryptographic ticket confirming the scan. Required for distributing apps outside the Mac App Store on macOS 10.15+. electron-builder notarizes automatically when notarization credentials are set (`mac.notarize: true` makes them required). See [Notarization](notarization.md).
 
 **NSIS (Nullsoft Scriptable Install System)**
 : The Windows installer framework used by electron-builder's `nsis` and `nsis-web` targets. Produces highly customizable `.exe` installers. The default Windows target. See [NSIS](nsis.md).
@@ -146,7 +146,7 @@ Quick reference for terms used throughout the electron-builder documentation.
 : The name of a code signing certificate as it appears in the macOS Keychain (e.g., `Developer ID Application: My Company (ABCDE12345)`). Referenced by `CSC_NAME` or `mac.sign.identity` in electron-builder config.
 
 **SmartScreen**
-: Windows Defender's application reputation service. It warns users when they run unsigned apps or apps from publishers with low download reputation. EV certificates bypass the reputation-building period; standard OV certificates require time.
+: Windows Defender's application reputation service. It warns users when they run unsigned apps or apps from publishers with low download reputation. Since 2024, no certificate type bypasses the reputation-building period; EV and OV certificates both require time.
 
 **Snap**
 : Canonical's Linux packaging format, primarily for Ubuntu. Snap apps run in a sandbox with declared "interface plugs" controlling system access. electron-builder's `snap` target produces Snap packages for Snap Store distribution. See [Snap](snap.md).

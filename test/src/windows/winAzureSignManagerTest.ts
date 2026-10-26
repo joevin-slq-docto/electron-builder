@@ -31,7 +31,7 @@ function makePackager(azureSignConfig: Partial<WindowsAzureSigningConfig>, vm?: 
 
 const baseAzureOpts: WindowsAzureSigningConfig = {
   type: "azure",
-  publisherName: "Test Publisher",
+  publisherName: "CN=Test Publisher, O=Test Publisher Inc, C=US",
   endpoint: "https://weu.codesigning.azure.net/",
   certificateProfileName: "my-profile",
   codeSigningAccountName: "my-account",
@@ -56,9 +56,20 @@ function captureEncodedCommand(execArgs: ExecArgs): string {
 
 describe("WindowsSignAzureManager.computedPublisherName", () => {
   test("wraps a single publisherName string in an array", async ({ expect }) => {
-    const manager = new WindowsSignAzureManager(makePackager({ ...baseAzureOpts, publisherName: "ACME Corp" }))
+    const manager = new WindowsSignAzureManager(makePackager({ ...baseAzureOpts, publisherName: "CN=ACME Corp, O=ACME Corp" }))
     const result = await manager.computedPublisherName.value
-    expect(result).toEqual(["ACME Corp"])
+    expect(result).toEqual(["CN=ACME Corp, O=ACME Corp"])
+  })
+
+  test("accepts a CN-only DN", async ({ expect }) => {
+    const manager = new WindowsSignAzureManager(makePackager({ ...baseAzureOpts, publisherName: "CN=ACME Corp" }))
+    await expect(manager.computedPublisherName.value).resolves.toEqual(["CN=ACME Corp"])
+  })
+
+  test.for(["ACME Corp", "CN="])("throws synchronously when publisherName %j is not a DN (electron-builder v27)", (publisherName, { expect }) => {
+    const manager = new WindowsSignAzureManager(makePackager({ ...baseAzureOpts, publisherName }))
+    expect(() => manager.computedPublisherName.value).toThrow(/is not a distinguished name\. Since electron-builder v27/)
+    expect(() => manager.computedPublisherName.value).toThrow(/v27-build-changes#windows-publishername-must-be-a-distinguished-name$/)
   })
 
   test("throws synchronously when publisherName is empty", ({ expect }) => {
@@ -74,18 +85,39 @@ describe("WindowsSignAzureManager.computedPublisherName", () => {
 
 // ─── signFile ─────────────────────────────────────────────────────────────────
 
-describe("WindowsSignAzureManager.signFile", { sequential: true }, () => {
+describe("WindowsSignAzureManager.signFile", { concurrent: false }, () => {
   let execSpy: ReturnType<typeof vi.fn>
   let manager: WindowsSignAzureManager
   const filePath = "C:\\builds\\app\\my-app.exe"
   const signOptions: WindowsSignOptions = {
     path: filePath,
-    options: { sign: baseAzureOpts } as any,
+    options: { sign: baseAzureOpts },
   }
 
   beforeEach(() => {
     execSpy = vi.fn().mockResolvedValue("")
     manager = new WindowsSignAzureManager(makePackager(baseAzureOpts, makeVm(execSpy)))
+  })
+
+  test("rejects a publisherName that is not a DN before signing anything", async ({ expect }) => {
+    const bareNameManager = new WindowsSignAzureManager(makePackager({ ...baseAzureOpts, publisherName: "Test Publisher" }, makeVm(execSpy)))
+    await expect(bareNameManager.signFile(signOptions)).rejects.toThrow(/Since electron-builder v27/)
+    expect(execSpy).not.toHaveBeenCalled()
+  })
+
+  test("passes the AZURE_* credential variables explicitly, since a child process gets no credentials otherwise", async ({ expect }) => {
+    vi.stubEnv("AZURE_CLIENT_SECRET", "azure-secret")
+    vi.stubEnv("AZURE_TENANT_ID", "tenant")
+    vi.stubEnv("GH_TOKEN", "github-token")
+    try {
+      await manager.signFile(signOptions)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+    const env = (execSpy.mock.calls[0][2] as { env: Record<string, string> }).env
+    expect(env.AZURE_CLIENT_SECRET).toBe("azure-secret")
+    expect(env.AZURE_TENANT_ID).toBe("tenant")
+    expect(env).not.toHaveProperty("GH_TOKEN")
   })
 
   test("invokes PowerShell via -EncodedCommand flag", async ({ expect }) => {
@@ -127,7 +159,7 @@ describe("WindowsSignAzureManager.signFile", { sequential: true }, () => {
       fileDigest: "SHA512",
     }
     const manager2 = new WindowsSignAzureManager(makePackager(opts, makeVm(execSpy)))
-    await manager2.signFile({ path: filePath, options: { sign: opts } as any })
+    await manager2.signFile({ path: filePath, options: { sign: opts } })
     const psCommand = captureEncodedCommand(execSpy.mock.calls[0] as ExecArgs)
     expect(psCommand).toContain("-TimestampRfc3161 'http://custom-tsa.example.com'")
     expect(psCommand).toContain("-TimestampDigest 'SHA384'")
@@ -145,7 +177,7 @@ describe("WindowsSignAzureManager.signFile", { sequential: true }, () => {
   test("passes additionalMetadata args through to the command", async ({ expect }) => {
     const opts = { ...baseAzureOpts, additionalMetadata: { ExcludeCredentials: "true" } }
     const manager2 = new WindowsSignAzureManager(makePackager(opts, makeVm(execSpy)))
-    await manager2.signFile({ path: filePath, options: { sign: opts } as any })
+    await manager2.signFile({ path: filePath, options: { sign: opts } })
     const psCommand = captureEncodedCommand(execSpy.mock.calls[0] as ExecArgs)
     expect(psCommand).toContain("-ExcludeCredentials 'true'")
   })
@@ -158,15 +190,15 @@ describe("WindowsSignAzureManager.signFile", { sequential: true }, () => {
 
   test("escapes single quotes in parameter values", async ({ expect }) => {
     const pathWithQuote = "C:\\user's documents\\app.exe"
-    await manager.signFile({ path: pathWithQuote, options: { sign: baseAzureOpts } as any })
+    await manager.signFile({ path: pathWithQuote, options: { sign: baseAzureOpts } })
     const psCommand = captureEncodedCommand(execSpy.mock.calls[0] as ExecArgs)
     // PowerShell single-quote escaping: ' → ''
     expect(psCommand).toContain(`-Files 'C:\\user''s documents\\app.exe'`)
   })
 
-  test("returns true on success", async ({ expect }) => {
+  test(`returns "signed" on success`, async ({ expect }) => {
     const result = await manager.signFile(signOptions)
-    expect(result).toBe(true)
+    expect(result).toBe("signed")
   })
 
   test("the encoded command round-trips correctly through Base64 UTF-16LE", async ({ expect }) => {

@@ -16,7 +16,7 @@ Several environment variables were **removed in v27** — most notably `CI_BUILD
 
 ## Code signing
 
-Signing credentials are read from the environment so certificates and passwords never have to live in your config. **Never commit them to source control** — inject them via CI secrets. Each value accepts an HTTPS URL, a `file://` path, a local path, or a base64-encoded certificate string.
+Signing credentials are read from the environment so certificates and passwords never have to live in your config. **Never commit them to source control** — inject them via CI secrets. Each value accepts an HTTPS URL, a `file://` path, a local path, or a base64-encoded certificate string — standard base64 without surrounding quotes (line breaks in it are ignored; see [Base64 certificate values](./features/code-signing/code-signing.md#base64-certificate-values)).
 
 ### Shared / macOS
 
@@ -44,7 +44,7 @@ Use `WIN_CSC_LINK` / `WIN_CSC_KEY_PASSWORD` to supply a separate Windows certifi
 :::
 
 :::note[More signing variables]
-The macOS keychain/identity variables (`CSC_NAME`, `CSC_IDENTITY_AUTO_DISCOVERY`, `CSC_KEYCHAIN`) and Azure Trusted Signing variables (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) are documented in the code-signing guides: [Code Signing](./features/code-signing/code-signing.md), [macOS](./features/code-signing/code-signing-mac.md), and [Windows](./features/code-signing/code-signing-win.md). In v27, `WIN_CSC_LINK` fallback applies only to `signtool` mode; `hsm`, `pkcs11`, and `azure` are configured through [`win.sign`](./migration/v27-breaking-changes.md#windows-signing-winsign).
+The macOS keychain/identity variables (`CSC_NAME`, `CSC_IDENTITY_AUTO_DISCOVERY`, `CSC_KEYCHAIN`) and Azure Trusted Signing variables (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) are documented in the code-signing guides: [Code Signing](./features/code-signing/code-signing.md), [macOS](./features/code-signing/code-signing-mac.md), and [Windows](./features/code-signing/code-signing-win.md). In v27, `WIN_CSC_LINK` fallback applies only to `signtool` mode; `hsm`, `pkcs11`, and `azure` are configured through [`win.sign`](./migration/v27-config-changes.md#windows-signing-winsign).
 :::
 
 ## Notarization (macOS)
@@ -56,11 +56,20 @@ For notarizing macOS apps distributed outside the Mac App Store. Provide **one**
 | `APPLE_ID` | Apple ID email (Apple-ID auth). |
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password for that Apple ID. |
 | `APPLE_TEAM_ID` | Apple Developer Team ID. |
-| `APPLE_API_KEY` | Path to the App Store Connect API key (`.p8`). |
+| `APPLE_API_KEY` | Path to the App Store Connect API key (`.p8`), or the file's contents base64-encoded on one line so CI systems can mask it (`base64 < AuthKey_KEYID.p8 \| tr -d '\n'`). |
 | `APPLE_API_KEY_ID` | Key ID for the App Store Connect API key. |
 | `APPLE_API_ISSUER` | Issuer ID for the App Store Connect API key. |
 | `APPLE_KEYCHAIN` | Keychain to search for a stored notarization profile. |
 | `APPLE_KEYCHAIN_PROFILE` | Name of a `notarytool` keychain profile to use. |
+
+## Update-manifest signing
+
+The Ed25519 private key that signs `latest*.yml`, required on publishing builds unless `updateManifest: false`. `updateManifest.signingKey` / `signingKeyFile` in the configuration take precedence, and `updateManifest: false` ignores both variables. Full setup is in [Signed Update Manifests](./features/signed-update-manifests.md#ci-secrets).
+
+| Variable | Description |
+|---|---|
+| `ELECTRON_BUILDER_UPDATE_SIGN_KEY` | The private key PEM file from `electron-builder create-update-key`, **base64-encoded** on one line so CI systems can mask it (`base64 < update-private-key.pem \| tr -d '\n'`). For several keys (rotation), concatenate the PEM files and encode them once. A raw PEM, or anything that is not the base64 of complete PEM keys, fails the build. |
+| `ELECTRON_BUILDER_UPDATE_SIGN_KEY_FILE` | Path to the private key PEM file, used when `ELECTRON_BUILDER_UPDATE_SIGN_KEY` is unset. Several paths are joined with the OS path delimiter (`:` on Linux/macOS, `;` on Windows); relative paths resolve against the current working directory. |
 
 ---
 
@@ -94,7 +103,7 @@ In v27 the Bitbucket publisher selects its auth scheme by whether a username is 
 - **`BITBUCKET_USERNAME` set** → HTTP **Basic** auth. Use this for an **app password** or an Atlassian **API token**.
 - **No username** → the token is sent as `Authorization: Bearer <token>` (a repository / project / workspace **access token**).
 
-If `BITBUCKET_TOKEN` holds an app password or API token, you **must** also set `BITBUCKET_USERNAME`. See [the breaking-change note](./migration/v27-breaking-changes.md#bitbucket-cloud-publishing-token-without-username-uses-bearer-auth).
+If `BITBUCKET_TOKEN` holds an app password or API token, you **must** also set `BITBUCKET_USERNAME`. See [the breaking-change note](./migration/v27-build-changes.md#bitbucket-cloud-publishing-token-without-username-uses-bearer-auth).
 :::
 
 ### Keygen
@@ -112,12 +121,15 @@ If `BITBUCKET_TOKEN` holds an app password or API token, you **must** also set `
 
 ### Amazon S3
 
+Read only when the S3 publish configuration sets `awsCredentials: { source: "env" }` (there is no default source). You can change the variable names with `awsCredentials.env`.
+
 | Variable | Description |
 |---|---|
 | `AWS_ACCESS_KEY_ID` | AWS access key ID. |
 | `AWS_SECRET_ACCESS_KEY` | AWS secret access key. |
 | `AWS_SESSION_TOKEN` | Optional session token for temporary credentials. |
-| `AWS_PROFILE` | Named profile in `~/.aws/credentials` to use when the keys above are not set (default: `default`). |
+
+Since v27, `AWS_PROFILE`, `AWS_SDK_LOAD_CONFIG`, `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` are **not** read, and publishing without `awsCredentials.source` fails. To use a named profile from the shared config/credentials files (including IAM Identity Center / SSO), set `awsCredentials: { source: "profile", profile: "<name>" }` in the [S3 publish options](./publish.md#s3); for a role assumed from an SSO profile via `source_profile`, set `{ source: "sso-role-chain", profile: "<name>" }`. The SSO and STS calls made for either source do not read `AWS_REGION`, `AWS_DEFAULT_REGION` or `AWS_ENDPOINT_URL*`.
 
 ### DigitalOcean Spaces
 
@@ -154,7 +166,7 @@ electron-builder detects the release tag and repository from standard CI variabl
 The GitHub repository is auto-detected from `TRAVIS_REPO_SLUG`, `APPVEYOR_REPO_NAME`, or `CIRCLE_PROJECT_USERNAME`/`CIRCLE_PROJECT_REPONAME` (falling back to your `package.json` `repository` field or `.git/config`).
 
 :::warning[CI_BUILD_TAG removed in v27]
-`CI_BUILD_TAG` was **removed** — use `CI_COMMIT_TAG` instead. See [the breaking-change note](./migration/v27-breaking-changes.md#ci_build_tag-environment-variable).
+`CI_BUILD_TAG` was **removed** — use `CI_COMMIT_TAG` instead. See [the breaking-change note](./migration/v27-build-changes.md#ci_build_tag-environment-variable).
 :::
 
 ---
@@ -167,7 +179,7 @@ The GitHub repository is auto-detected from `TRAVIS_REPO_SLUG`, `APPVEYOR_REPO_N
 | `USE_HARD_LINKS` | Set to `"true"` to copy files via hard links where possible (faster, less disk use). Ignored on Windows. |
 
 :::note[Electron mirror is config, not an env var]
-To download Electron from a mirror, configure [`electronGet.mirrorOptions`](./migration/v27-breaking-changes.md#electrondownload-electronget) in your build config — e.g. `electronGet: { mirrorOptions: { mirror: "https://my-mirror/" } }`. (In v26 this was `electronDownload.mirror`.) See [Configuration](./configuration.md).
+To download Electron from a mirror, configure [`electronGet.mirrorOptions`](./migration/v27-config-changes.md#electrondownload-electronget) in your build config — e.g. `electronGet: { mirrorOptions: { mirror: "https://my-mirror/" } }`. (In v26 this was `electronDownload.mirror`.) See [Configuration](./configuration.md).
 :::
 
 ---
@@ -184,6 +196,8 @@ DEBUG=electron-builder electron-builder --linux snap
 
 Namespaced channels are also available — e.g. `DEBUG=electron-builder:7z` for archive operations, or `DEBUG=electron-builder*` for everything.
 
+The flatpak target no longer has a namespace of its own: `DEBUG=@malept/flatpak-bundler`, which v26 needed to show the output of `flatpak` and `flatpak-builder`, has no effect in v27. `DEBUG=electron-builder` logs every command the target runs, and a failed command prints its output without any `DEBUG` setting.
+
 ---
 
 ## Removed in v27
@@ -193,15 +207,15 @@ These variables were removed in v27. `electron-builder migrate-schema` does **no
 | Removed variable | Replacement |
 |---|---|
 | `CI_BUILD_TAG` | [`CI_COMMIT_TAG`](#ci-and-release-tags) |
-| `ALLOW_ELECTRON_BUILDER_AS_PRODUCTION_DEPENDENCY` | The [`ignoredProductionDependencies`](./configuration.md) build option — see the [breaking-change note](./migration/v27-breaking-changes.md#redundant-production-dependencies-are-excluded-not-rejected). |
+| `ALLOW_ELECTRON_BUILDER_AS_PRODUCTION_DEPENDENCY` | The [`ignoredProductionDependencies`](./configuration.md) build option — see the [breaking-change note](./migration/v27-build-changes.md#redundant-production-dependencies-are-excluded-not-rejected). |
 
 ### Toolset overrides
 
-The environment variables that pointed electron-builder at custom build-tool bundles are **all removed**. Supply a custom bundle through a [`ToolsetCustom`](./migration/v27-breaking-changes.md#toolset-env-var-overrides-removed) object on the relevant `toolsets` key instead (`toolsets.<name>: { url, checksum }`).
+The environment variables that pointed electron-builder at custom build-tool bundles are **all removed**. Supply a custom bundle through a [`ToolsetCustom`](./migration/v27-build-changes.md#toolset-env-var-overrides-removed) object on the relevant `toolsets` key instead (`toolsets.<name>: { url, checksum }`).
 
 | Removed variable | What it controlled |
 |---|---|
-| `USE_SYSTEM_WINE` | Forced host-installed Wine instead of the bundle. |
+| `USE_SYSTEM_WINE` | Forced host-installed Wine instead of the bundle. Replaced by `toolsets.wine: "system"`. |
 | `USE_SYSTEM_SIGNCODE` | Forced host `signtool`/`signcode`. |
 | `USE_SYSTEM_OSSLSIGNCODE` | Forced host `osslsigncode`. |
 | `USE_SYSTEM_FPM` | Forced host-installed `fpm`. |
@@ -213,5 +227,5 @@ The environment variables that pointed electron-builder at custom build-tool bun
 | `CUSTOM_NSIS_RESOURCES` | Alternate NSIS resources bundle. |
 | `ELECTRON_BUILDER_WINE_TOOLSET_DIR` | Wine bundle directory. |
 
-The three signing `USE_SYSTEM_*` variables have **no env-var replacement** — configure signing through [`win.sign`](./migration/v27-breaking-changes.md#windows-signing-winsign) and the `winCodeSign` toolset. For the full replacement mechanics (archive formats, checksums, `file://` directories), see [Toolset env-var overrides removed](./migration/v27-breaking-changes.md#toolset-env-var-overrides-removed).
+The two signing `USE_SYSTEM_*` variables (`USE_SYSTEM_SIGNCODE`, `USE_SYSTEM_OSSLSIGNCODE`) have **no env-var replacement** — configure signing through [`win.sign`](./migration/v27-config-changes.md#windows-signing-winsign) and the `winCodeSign` toolset. For the full replacement mechanics (archive formats, checksums, `file://` directories), see [Toolset env-var overrides removed](./migration/v27-build-changes.md#toolset-env-var-overrides-removed).
 

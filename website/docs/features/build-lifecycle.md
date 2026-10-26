@@ -31,7 +31,9 @@ electron-builder build
 │   ├─ 2e. Post-Pack (before signing)
 │   │   └─ 🪝 afterPack
 │   │
-│   ├─ 2f. Apply Electron Fuses (if configured)
+│   ├─ 2f. Patch the Electron binary (before signing)
+│   │   ├─ Embed the ASAR integrity digest (macOS, Electron 41+)
+│   │   └─ Apply Electron Fuses (if configured)
 │   │
 │   ├─ 2g. Code Sign the .app / .exe
 │   │   └─ 🪝 afterSign  (only fires if signing actually ran)
@@ -198,7 +200,9 @@ afterPack: async ({ outDir, appOutDir, packager, electronPlatformName, arch, tar
 
 ---
 
-### Phase 2f — Apply Electron Fuses
+### Phase 2f — Patch the Electron binary
+
+On macOS with Electron 41 and later, electron-builder first embeds the ASAR integrity digest: a digest of the `ElectronAsarIntegrity` hashes in `Info.plist`, as `afterPack` left them, written into the Electron Framework, which is then signed again ad hoc. With the `enableEmbeddedAsarIntegrityValidation` fuse, an app whose `Info.plist` is changed after this point refuses to launch. `mac.asarIntegrityDigest: false` skips this step.
 
 If `electronFuses` is configured, fuse bits are flipped in the Electron binary at this point — after packing, before signing. Fuses are baked into the binary and cannot be changed post-sign.
 
@@ -216,7 +220,7 @@ The app bundle is signed using the platform-native toolchain:
 | Windows | `signtool.exe` | EXE and DLL files |
 | Linux | _(no signing in this phase)_ | — |
 
-Notarization (macOS) runs here when `mac.notarize: true` is set.
+Notarization (macOS) runs here when notarization credentials are set (and `mac.notarize` is not `false`); with `mac.notarize: true` missing credentials fail the build.
 
 #### 🪝 `afterSign`
 
@@ -233,7 +237,7 @@ afterSign: async ({ outDir, appOutDir, packager, electronPlatformName, arch, tar
 ```
 
 :::tip[Built-in notarization]
-Use `mac.notarize: true` for standard notarization — electron-builder handles it automatically. Only reach for `afterSign` when you need a custom notarization flow. See [Notarization](/docs/features/code-signing/notarization).
+Standard notarization needs no hook — electron-builder notarizes automatically when the credentials are set (`mac.notarize: true` makes them required). Only reach for `afterSign` when you need a custom notarization flow. See [Notarization](/docs/features/code-signing/notarization).
 :::
 
 For a fully custom signing implementation (replacing the built-in signer):
@@ -246,7 +250,12 @@ win:
   sign:
     type: signtool
     sign: ./scripts/custom-sign.js
+    publisherName: "CN=My Company, O=My Company, C=US"
 ```
+
+On macOS, a custom `mac.sign` signer is called even when no identity is found in the keychain (a remote or HSM signer needs none): `configuration.identity` is then not set, and the build logs that it calls the signer without an identity. A Mac App Store app is the exception: its installer needs a keychain identity, so without one the signer is not called and the build warns (with `forceCodeSigning` it is called, and the missing installer identity fails the build).
+
+On Windows, electron-builder cannot read the certificate a custom hook signs with, so set `win.sign.publisherName` to that certificate's subject — it is written to `app-update.yml` for update signature verification, and a build that writes `app-update.yml` fails without it. Copy it from a binary the hook already signed, as shown in [How do you delegate code signing?](../win.md#how-do-you-delegate-code-signing); every component you list must match exactly.
 
 ---
 
@@ -292,6 +301,7 @@ Some targets expose additional hooks that fire inside their own build sequence:
 |---|---|---|
 | `msiProjectCreated` | MSI (WiX) | After WiX `.wxs` file is written to disk, before `candle.exe` / `light.exe` |
 | `appxManifestCreated` | AppX / MSIX | After `AppxManifest.xml` is written to disk, before `makeappx.exe` |
+| `pkgDistributionCreated` | PKG | After `distribution.xml` is written to disk, before `productbuild` builds the installer |
 
 ```js
 // Edit the WiX XML before MSI compilation
@@ -369,6 +379,7 @@ See [Publish Configuration](/docs/publish) for provider setup.
 | `artifactBuildStarted` | 2h | Target build starting | Logging, timing |
 | `msiProjectCreated` | 2h (MSI) | WiX `.wxs` file on disk | Edit WiX XML |
 | `appxManifestCreated` | 2h (AppX) | `AppxManifest.xml` on disk | Edit AppX manifest |
+| `pkgDistributionCreated` | 2h (PKG) | `distribution.xml` on disk | Edit the installer distribution |
 | `artifactBuildCompleted` | 2h | Artifact file on disk | Checksums, per-artifact upload |
 | `afterAllArtifactBuild` | 3 | All artifacts on disk | Symbol upload, extra publish paths |
 
@@ -393,7 +404,7 @@ Each target runs inside Phase 2h. Here is what happens inside each one:
 |---|---|
 | **DMG** | Create `.dmg` via `dmgbuild` → emit |
 | **ZIP** | Archive `.app` bundle → emit |
-| **PKG** | Build `.pkg` via `pkgbuild` + `productbuild` → sign → emit |
+| **PKG** | Build the component package via `pkgbuild` and write `distribution.xml` → `pkgDistributionCreated` hook → `productbuild` → sign → emit |
 | **MAS** | Re-sign with MAS provisioning profile → build `pkg` → emit |
 
 ### Linux
@@ -403,7 +414,7 @@ Each target runs inside Phase 2h. Here is what happens inside each one:
 | **AppImage** | Create squashfs image → embed ELF header → emit |
 | **DEB / RPM / Pacman** | Package via `fpm` → emit |
 | **Snap** | Write `snapcraft.yaml` → run `snapcraft` → emit |
-| **Flatpak** | Write manifest → run `flatpak-builder` → emit |
+| **Flatpak** | Write manifest → run `flatpak-builder` → `flatpak build-export` + `flatpak build-bundle` → emit |
 
 ---
 
@@ -452,6 +463,6 @@ See [Multi Platform Build](/docs/features/multi-platform-build) and [Build Archi
 
 - [Hooks Reference](/docs/features/hooks) — full API for every hook, with examples
 - [File Patterns](/docs/file-patterns) — how `files`, `extraResources`, and `extraFiles` work
-- [Code Signing](/docs/features/code-signing/code-signing) — signing setup for macOS and Windows
+- [Code Signing](/docs/features/code-signing) — signing setup for macOS and Windows
 - [Publish Configuration](/docs/publish) — provider setup and update metadata
 - [Programmatic Usage](/docs/programmatic-usage) — drive the build from Node.js

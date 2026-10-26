@@ -2,9 +2,10 @@ import { Arch, defaultArchFromString } from "builder-util"
 import * as path from "path"
 import { Platform, Target, TargetSpecificOptions } from "../core.js"
 import { copyFiles, getFileMatchers } from "../fileMatcher.js"
-import { PlatformPackager } from "../platformPackager.js"
+import { PlatformPackager, trackPackWork } from "../platformPackager.js"
 import { archive, shouldPreserveSymlinks, tar } from "./archive.js"
 import { appendBlockmap, createBlockmap } from "./differentialUpdateInfoBuilder.js"
+import { getTrustedSourceRoots } from "../util/trustedSourceRoots.js"
 
 export class ArchiveTarget extends Target {
   readonly options: TargetSpecificOptions
@@ -17,6 +18,10 @@ export class ArchiveTarget extends Target {
   ) {
     super(name)
     this.options = (this.packager.config as any)[this.name]
+  }
+
+  get writesUpdateInfo(): boolean {
+    return this.isWriteUpdateInfo
   }
 
   async build(appOutDir: string, arch: Arch): Promise<any> {
@@ -34,7 +39,7 @@ export class ArchiveTarget extends Target {
       defaultPattern = "${productName}-${version}" + (arch === defaultArch ? "" : "-${arch}") + "-${os}.${ext}"
     }
 
-    this.buildQueueManager.add(async () => {
+    const work = (async () => {
       const artifactName = packager.expandArtifactNamePattern(this.options, format, arch, defaultPattern, false)
       const artifactPath = path.join(this.outDir, artifactName)
 
@@ -64,7 +69,11 @@ export class ArchiveTarget extends Target {
           if (fileMatchers == null) {
             dirToArchive = appOutDir
           } else {
-            await copyFiles(fileMatchers, null, true)
+            await copyFiles(fileMatchers, null, true, {
+              roots: [dirToArchive, this.outDir],
+              allowedSymlinkRoots: await getTrustedSourceRoots(packager),
+              externalLinks: await packager.getExternalLinkPolicy(),
+            })
             withoutDir = true
           }
         }
@@ -73,12 +82,13 @@ export class ArchiveTarget extends Target {
           compression: packager.compression,
           withoutDir,
           preserveSymlinks: shouldPreserveSymlinks(packager.platform),
+          externalLinks: await packager.getExternalLinkPolicy(),
         }
         await archive(format, artifactPath, dirToArchive, archiveOptions)
 
         if (this.isWriteUpdateInfo && format === "zip") {
           if (isMac) {
-            updateInfo = await createBlockmap(artifactPath, this, packager, artifactName)
+            updateInfo = await createBlockmap(artifactPath, this, packager, artifactName, arch)
           } else {
             updateInfo = await appendBlockmap(artifactPath)
           }
@@ -102,7 +112,10 @@ export class ArchiveTarget extends Target {
         packager,
         isWriteUpdateInfo: this.isWriteUpdateInfo,
       })
-    })
+    })()
+    this.buildQueueManager.addTask(work)
+    // a target writing into appOutDir (Squirrel.Windows) waits for the archive
+    trackPackWork(packager, appOutDir, work)
     return Promise.resolve()
   }
 }
